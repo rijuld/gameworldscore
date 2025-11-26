@@ -75,11 +75,11 @@ wget https://huggingface.co/Etched/oasis-500m/resolve/main/vit-l-20.safetensors 
 # Or: wget https://huggingface.co/Etched/oasis-500m/resolve/main/vit-l-20.safetensors -P checkpoints/
 ```
 
-**Note:** If you save to a different location, update the paths when running training:
+**Note:** The default paths in `train.py` are `checkpoints/oasis500m.safetensors` and `checkpoints/vit-l-20.safetensors`. If you save to a different location, specify the paths when running training:
 ```bash
 python train.py \
-    --oasis-ckpt checkpoints/oasis500m.safetensors \
-    --vae-ckpt checkpoints/vit-l-20.safetensors
+    --oasis-ckpt /path/to/oasis500m.safetensors \
+    --vae-ckpt /path/to/vit-l-20.safetensors
 ```
 
 ### 2. Reward Models
@@ -97,26 +97,24 @@ This downloads:
 ## Quick Start
 
 ```bash
-# Basic training
-python train.py \
-    --oasis-ckpt oasis500m.safetensors \
-    --vae-ckpt vit-l-20.safetensors \
-    --data-dir ../open-oasis/sample_data
+# Basic training (uses default paths: checkpoints/oasis500m.safetensors and checkpoints/vit-l-20.safetensors)
+python train.py --data-dir ../open-oasis/sample_data
 
 # With custom reward weights
 python train.py \
-    --oasis-ckpt oasis500m.safetensors \
-    --vae-ckpt vit-l-20.safetensors \
     --rik-weight 2.0 \
     --rtc-weight 1.0 \
     --raq-weight 0.5
 
 # Using GRPO advantage estimation
 python train.py \
-    --oasis-ckpt oasis500m.safetensors \
-    --vae-ckpt vit-l-20.safetensors \
     --adv-estimator grpo \
     --use-wandb
+
+# With custom model paths (if saved elsewhere)
+python train.py \
+    --oasis-ckpt /path/to/oasis500m.safetensors \
+    --vae-ckpt /path/to/vit-l-20.safetensors
 ```
 
 ## Project Structure

@@ -42,13 +42,13 @@ def parse_args():
     parser.add_argument(
         "--oasis-ckpt",
         type=str,
-        default="oasis500m.safetensors",
+        default="checkpoints/oasis500m.safetensors",
         help="Path to Oasis DiT checkpoint",
     )
     parser.add_argument(
         "--vae-ckpt",
         type=str,
-        default="vit-l-20.safetensors",
+        default="checkpoints/vit-l-20.safetensors",
         help="Path to VAE checkpoint",
     )
     parser.add_argument(

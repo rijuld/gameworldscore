@@ -3,8 +3,8 @@
 
 # Model paths
 model:
-  oasis_ckpt: "oasis500m.safetensors"
-  vae_ckpt: "vit-l-20.safetensors"
+  oasis_ckpt: "checkpoints/oasis500m.safetensors"
+  vae_ckpt: "checkpoints/vit-l-20.safetensors"
   dit_type: "DiT-S/2"
   
 # Reward model paths

@@ -60,11 +60,26 @@ pip install -r requirements.txt
 Download the Oasis DiT and VAE checkpoints from the [Oasis repository](https://github.com/etched-ai/open-oasis):
 
 ```bash
-# Download Oasis-500M
-wget https://huggingface.co/Etched/oasis-500m/resolve/main/oasis500m.safetensors
+# Create a directory for model checkpoints (optional, but recommended)
+mkdir -p checkpoints
 
-# Download VAE
-wget https://huggingface.co/Etched/oasis-500m/resolve/main/vit-l-20.safetensors
+# Download Oasis-500M to a specific location
+# Option 1: Using -O to specify exact output path
+wget https://huggingface.co/Etched/oasis-500m/resolve/main/oasis500m.safetensors -O checkpoints/oasis500m.safetensors
+
+# Option 2: Using -P to specify output directory
+# wget https://huggingface.co/Etched/oasis-500m/resolve/main/oasis500m.safetensors -P checkpoints/
+
+# Download VAE to a specific location
+wget https://huggingface.co/Etched/oasis-500m/resolve/main/vit-l-20.safetensors -O checkpoints/vit-l-20.safetensors
+# Or: wget https://huggingface.co/Etched/oasis-500m/resolve/main/vit-l-20.safetensors -P checkpoints/
+```
+
+**Note:** If you save to a different location, update the paths when running training:
+```bash
+python train.py \
+    --oasis-ckpt checkpoints/oasis500m.safetensors \
+    --vae-ckpt checkpoints/vit-l-20.safetensors
 ```
 
 ### 2. Reward Models

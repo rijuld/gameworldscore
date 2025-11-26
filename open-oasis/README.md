@@ -15,7 +15,8 @@ And to use the most powerful version of the model, be sure to check out the [liv
 git clone https://github.com/etched-ai/open-oasis.git
 cd open-oasis
 # Install pytorch
-rm # Install other dependencies
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Install other dependencies
 pip install einops diffusers timm av
 ```
 

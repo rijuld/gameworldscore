@@ -1,0 +1,88 @@
+# Oasis RL Finetuning Configuration
+# Default configuration for PPO training with GameWorldScore reward
+
+# Model paths
+model:
+  oasis_ckpt: "oasis500m.safetensors"
+  vae_ckpt: "vit-l-20.safetensors"
+  dit_type: "DiT-S/2"
+  
+# Reward model paths
+reward:
+  models_dir: "models_for_rl_finetuning"
+  # GameWorldScore component weights
+  rik_weight: 1.0  # Inverse Kinematics (action fidelity)
+  rtc_weight: 1.0  # Temporal Consistency
+  raq_weight: 1.0  # Aesthetic Quality
+  normalize_weights: true
+  use_motion_smoothness: false
+
+# Data configuration
+data:
+  # MiDaS-60 Minecraft block dataset
+  data_dir: "Dataset/MiDaS-60_small"
+  dataset_type: "auto"  # auto, video, or midas
+  train_batch_size: 4
+  val_batch_size: 2
+  clip_length: 32
+  n_prompt_frames: 1
+  max_gen_frames: 31
+  frame_size: [360, 640]
+  num_workers: 4
+  # For MiDaS dataset: sample frames from same category for consistency
+  sample_same_category: true
+  augment: true
+
+# Training configuration
+training:
+  total_epochs: 10
+  total_training_steps: 10000
+  ppo_epochs: 1
+  ppo_mini_batch_size: 4
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  grad_clip: 1.0
+  
+# PPO hyperparameters
+ppo:
+  gamma: 0.99
+  lam: 0.95
+  clip_ratio: 0.2
+  entropy_coeff: 0.01
+  
+# KL regularization
+kl:
+  use_kl_in_reward: true
+  kl_coeff: 0.001
+  kl_target: 0.1
+  adaptive_kl: true
+  
+# Advantage estimation
+advantage:
+  estimator: "grpo"  # Options: "gae", "grpo", "reinforce_plus_plus", "rloo"
+  
+# Rollout configuration  
+rollout:
+  n_rollouts: 1
+  temperature: 1.0
+  ddim_steps: 10
+  do_sample: true
+  
+# Checkpointing and logging
+checkpoint:
+  save_freq: 100
+  test_freq: 50
+  checkpoint_dir: "checkpoints/oasis_ppo"
+  max_checkpoints: 5
+  
+logging:
+  project_name: "oasis_rl_finetuning"
+  experiment_name: "gameworldscore"
+  use_wandb: true
+  log_interval: 10
+  
+# Device configuration
+device:
+  cuda: true
+  dtype: "float16"  # Options: "float16", "bfloat16", "float32"
+

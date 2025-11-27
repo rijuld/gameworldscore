@@ -54,7 +54,7 @@ class OasisPPOConfig:
     reward_models_dir: str = "models_for_rl_finetuning"
     
     # Data settings
-    data_dir: str = "Dataset/MiDaS-60_small"
+    data_dir: str = "../Dataset/MiDaS-60_small"
     dataset_type: str = "auto"  # "auto", "video", "midas"
     frame_size: Tuple[int, int] = (360, 640)
     

@@ -96,8 +96,8 @@ This downloads:
 ## Quick Start
 
 ```bash
-# Basic training (uses default HuggingFace cache paths)
-python train.py --data-dir ../open-oasis/sample_data
+# Basic training (uses default HuggingFace cache paths and MiDaS-60 dataset)
+python train.py
 
 # With custom reward weights
 python train.py \

@@ -20,7 +20,7 @@ reward:
 # Data configuration
 data:
   # MiDaS-60 Minecraft block dataset
-  data_dir: "Dataset/MiDaS-60_small"
+  data_dir: "../Dataset/MiDaS-60_small"
   dataset_type: "auto"  # auto, video, or midas
   train_batch_size: 4
   val_batch_size: 2

@@ -58,7 +58,7 @@ class GameWorldScoreReward(nn.Module):
         # Model paths
         idm_model_path: Optional[str] = None,
         idm_weights_path: Optional[str] = None,
-        clip_model_path: str = "openai/clip-vit-base-patch32",
+        clip_model_path: str = "openai/clip-vit-large-patch14",
         aesthetic_checkpoint: Optional[str] = None,
         # Weights
         rik_weight: float = 1.0,
@@ -276,7 +276,7 @@ def create_game_world_score_reward(
     Create GameWorldScore reward with models from the specified directory.
     
     Expected directory structure:
-    - models_dir/clip-vit-base-patch32/  (CLIP model)
+    - models_dir/clip-vit-large-patch14/  (CLIP model, ViT-L/14 for 768-dim embeddings)
     - models_dir/aesthetic_predictor.pth  (Aesthetic predictor weights)
     - models_dir/4x_idm.model  (IDM model definition)
     - models_dir/4x_idm.weights  (IDM weights)
@@ -293,9 +293,10 @@ def create_game_world_score_reward(
     """
     import os
     
-    clip_path = os.path.join(models_dir, "clip-vit-base-patch32")
+    # Use ViT-L/14 to match aesthetic predictor (768-dim embeddings)
+    clip_path = os.path.join(models_dir, "clip-vit-large-patch14")
     if not os.path.exists(clip_path):
-        clip_path = "openai/clip-vit-base-patch32"  # Fall back to hub
+        clip_path = "openai/clip-vit-large-patch14"  # Fall back to hub
     
     aesthetic_path = os.path.join(models_dir, "aesthetic_predictor.pth")
     if not os.path.exists(aesthetic_path):

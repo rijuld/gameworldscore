@@ -122,7 +122,7 @@ class AestheticQualityReward(nn.Module):
     
     def __init__(
         self,
-        clip_model_path: str = "openai/clip-vit-base-patch32",
+        clip_model_path: str = "openai/clip-vit-large-patch14",
         aesthetic_checkpoint: Optional[str] = None,
         device: str = "cuda",
         musiq_weight: float = 0.5,
@@ -288,7 +288,7 @@ class AestheticQualityReward(nn.Module):
 
 
 def load_aesthetic_quality_reward(
-    clip_model_path: str = "openai/clip-vit-base-patch32",
+    clip_model_path: str = "openai/clip-vit-large-patch14",
     aesthetic_checkpoint: Optional[str] = None,
     device: str = "cuda",
 ) -> AestheticQualityReward:

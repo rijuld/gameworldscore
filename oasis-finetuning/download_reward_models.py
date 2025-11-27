@@ -34,12 +34,12 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {OUTPUT_DIR.absolute()}\n")
 
-    # 1. CLIP
-    print("1. Downloading CLIP...")
+    # 1. CLIP (ViT-L/14 to match aesthetic predictor embeddings - 768 dim)
+    print("1. Downloading CLIP ViT-L/14...")
     from transformers import CLIPModel, CLIPProcessor
-    clip_dir = OUTPUT_DIR / "clip-vit-base-patch32"
-    CLIPModel.from_pretrained("openai/clip-vit-base-patch32").save_pretrained(str(clip_dir))
-    CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32").save_pretrained(str(clip_dir))
+    clip_dir = OUTPUT_DIR / "clip-vit-large-patch14"
+    CLIPModel.from_pretrained("openai/clip-vit-large-patch14").save_pretrained(str(clip_dir))
+    CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14").save_pretrained(str(clip_dir))
     print(f"  Saved to {clip_dir}")
 
     # 2. Aesthetic Predictor

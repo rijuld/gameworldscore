@@ -30,7 +30,7 @@ class TemporalConsistencyReward(nn.Module):
     
     def __init__(
         self,
-        clip_model_path: str = "openai/clip-vit-base-patch32",
+        clip_model_path: str = "openai/clip-vit-large-patch14",
         device: str = "cuda",
         use_motion_smoothness: bool = False,
     ):
@@ -228,7 +228,7 @@ class TemporalConsistencyReward(nn.Module):
 
 
 def load_temporal_consistency_reward(
-    clip_model_path: str = "openai/clip-vit-base-patch32",
+    clip_model_path: str = "openai/clip-vit-large-patch14",
     device: str = "cuda",
 ) -> TemporalConsistencyReward:
     """

@@ -636,48 +636,101 @@ class OasisPPOTrainer:
         """
         Main training loop.
         """
-        print(f"Starting Oasis PPO training for {self.config.total_training_steps} steps...")
+        print(f"\n{'='*60}")
+        print(f"Starting Oasis PPO Training")
+        print(f"{'='*60}")
+        print(f"  Total epochs: {self.config.total_epochs}")
+        print(f"  Total steps: {self.config.total_training_steps}")
+        print(f"  Batch size: {self.config.train_batch_size}")
+        print(f"  Learning rate: {self.config.learning_rate}")
+        print(f"{'='*60}\n")
         
         if self.train_dataloader is None:
             print("No training data available. Exiting.")
             return
         
-        progress_bar = tqdm(total=self.config.total_training_steps, desc="Training")
-        
         self.global_step = 0
         
         for epoch in range(self.config.total_epochs):
-            for batch in self.train_dataloader:
+            if self.global_step >= self.config.total_training_steps:
+                break
+            
+            # Epoch header
+            print(f"\n{'─'*60}")
+            print(f"Epoch {epoch + 1}/{self.config.total_epochs}")
+            print(f"{'─'*60}")
+            
+            epoch_metrics = defaultdict(list)
+            steps_in_epoch = len(self.train_dataloader)
+            
+            # Progress bar for this epoch
+            epoch_pbar = tqdm(
+                self.train_dataloader,
+                desc=f"Epoch {epoch + 1}",
+                total=steps_in_epoch,
+                leave=True,
+            )
+            
+            for batch_idx, batch in enumerate(epoch_pbar):
                 if self.global_step >= self.config.total_training_steps:
                     break
                 
                 # Training step
                 metrics = self.train_step(batch)
                 
-                # Logging
+                # Accumulate epoch metrics
+                for k, v in metrics.items():
+                    epoch_metrics[k].append(v)
+                
+                # Update progress bar with current metrics
+                epoch_pbar.set_postfix({
+                    'step': self.global_step,
+                    'reward': f"{metrics.get('reward/mean', 0):.3f}",
+                    'loss': f"{metrics.get('train/pg_loss', 0):.4f}",
+                })
+                
+                # Logging to wandb
                 if self.logger is not None:
                     self.logger.log(metrics, step=self.global_step)
                 
-                # Console logging (every 10 steps)
-                if self.global_step % 10 == 0:
-                    print(f"Step {self.global_step}: reward={metrics.get('reward/mean', 0):.4f}, "
-                          f"pg_loss={metrics.get('train/pg_loss', 0):.4f}")
-                
                 # Checkpointing
-                if self.config.save_freq > 0 and self.global_step % self.config.save_freq == 0:
+                if self.config.save_freq > 0 and self.global_step % self.config.save_freq == 0 and self.global_step > 0:
                     self.save_checkpoint()
                 
-                progress_bar.update(1)
                 self.global_step += 1
             
-            if self.global_step >= self.config.total_training_steps:
-                break
+            # Epoch summary
+            if epoch_metrics:
+                avg_reward = np.mean(epoch_metrics.get('reward/mean', [0]))
+                avg_loss = np.mean(epoch_metrics.get('train/pg_loss', [0]))
+                avg_rik = np.mean(epoch_metrics.get('reward/rik', [0]))
+                avg_rtc = np.mean(epoch_metrics.get('reward/rtc', [0]))
+                avg_raq = np.mean(epoch_metrics.get('reward/raq', [0]))
+                
+                print(f"\n  Epoch {epoch + 1} Summary:")
+                print(f"    Steps completed: {len(epoch_metrics.get('reward/mean', []))}")
+                print(f"    Avg Reward: {avg_reward:.4f}")
+                print(f"    Avg Loss: {avg_loss:.4f}")
+                print(f"    Rewards - RIK: {avg_rik:.4f}, RTC: {avg_rtc:.4f}, RAQ: {avg_raq:.4f}")
+                
+                # Log epoch summary
+                if self.logger is not None:
+                    self.logger.log({
+                        'epoch': epoch + 1,
+                        'epoch/avg_reward': avg_reward,
+                        'epoch/avg_loss': avg_loss,
+                        'epoch/avg_rik': avg_rik,
+                        'epoch/avg_rtc': avg_rtc,
+                        'epoch/avg_raq': avg_raq,
+                    }, step=self.global_step)
         
         # Final checkpoint
         self.save_checkpoint()
-        progress_bar.close()
         
-        print("Training complete!")
+        print(f"\n{'='*60}")
+        print(f"Training Complete!")
+        print(f"  Total steps: {self.global_step}")
+        print(f"{'='*60}")
     
     def save_checkpoint(self, path: Optional[str] = None):
         """Save training checkpoint."""

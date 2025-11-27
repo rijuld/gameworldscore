@@ -48,7 +48,16 @@ class AestheticPredictor(nn.Module):
     def _load_checkpoint(self, path: str):
         """Load pretrained weights."""
         state_dict = torch.load(path, weights_only=True)
-        self.mlp.load_state_dict(state_dict)
+        
+        # Handle different checkpoint formats
+        # Some checkpoints have 'layers.' prefix, some don't
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            # Remove 'layers.' prefix if present
+            new_key = key.replace('layers.', '') if key.startswith('layers.') else key
+            new_state_dict[new_key] = value
+        
+        self.mlp.load_state_dict(new_state_dict)
     
     def forward(self, clip_embeddings: torch.Tensor) -> torch.Tensor:
         """

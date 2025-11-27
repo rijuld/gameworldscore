@@ -67,8 +67,8 @@ def parse_args():
     parser.add_argument(
         "--data-dir",
         type=str,
-        default="../Dataset/MiDaS-60_small",
-        help="Directory containing training data (default: ../Dataset/MiDaS-60_small)",
+        default="Dataset/MiDaS-60_small",
+        help="Directory containing training data (default: Dataset/MiDaS-60_small)",
     )
     parser.add_argument(
         "--dataset-type",

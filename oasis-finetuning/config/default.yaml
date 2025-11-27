@@ -3,8 +3,8 @@
 
 # Model paths
 model:
-  oasis_ckpt: "checkpoints/oasis500m.safetensors"
-  vae_ckpt: "checkpoints/vit-l-20.safetensors"
+  oasis_ckpt: "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/oasis500m.safetensors"
+  vae_ckpt: "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/vit-l-20.safetensors"
   dit_type: "DiT-S/2"
   
 # Reward model paths

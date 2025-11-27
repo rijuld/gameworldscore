@@ -60,22 +60,21 @@ pip install -r requirements.txt
 Download the Oasis DiT and VAE checkpoints from the [Oasis repository](https://github.com/etched-ai/open-oasis):
 
 ```bash
-# Create a directory for model checkpoints (optional, but recommended)
-mkdir -p checkpoints
+# Download using HuggingFace CLI (recommended - downloads to HF cache)
+hf download Etched/oasis-500m oasis500m.safetensors
+hf download Etched/oasis-500m vit-l-20.safetensors
 
-# Download Oasis-500M to a specific location
-# Option 1: Using -O to specify exact output path
-wget https://huggingface.co/Etched/oasis-500m/resolve/main/oasis500m.safetensors -O checkpoints/oasis500m.safetensors
-
-# Option 2: Using -P to specify output directory
-# wget https://huggingface.co/Etched/oasis-500m/resolve/main/oasis500m.safetensors -P checkpoints/
-
-# Download VAE to a specific location
-wget https://huggingface.co/Etched/oasis-500m/resolve/main/vit-l-20.safetensors -O checkpoints/vit-l-20.safetensors
-# Or: wget https://huggingface.co/Etched/oasis-500m/resolve/main/vit-l-20.safetensors -P checkpoints/
+# Or using wget to a custom location:
+# mkdir -p checkpoints
+# wget https://huggingface.co/Etched/oasis-500m/resolve/main/oasis500m.safetensors -O checkpoints/oasis500m.safetensors
+# wget https://huggingface.co/Etched/oasis-500m/resolve/main/vit-l-20.safetensors -O checkpoints/vit-l-20.safetensors
 ```
 
-**Note:** The default paths in `train.py` are `checkpoints/oasis500m.safetensors` and `checkpoints/vit-l-20.safetensors`. If you save to a different location, specify the paths when running training:
+**Note:** The default paths in `train.py` use the HuggingFace cache location:
+- `/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/oasis500m.safetensors`
+- `/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/vit-l-20.safetensors`
+
+If your models are in a different location, specify the paths when running training:
 ```bash
 python train.py \
     --oasis-ckpt /path/to/oasis500m.safetensors \
@@ -97,7 +96,7 @@ This downloads:
 ## Quick Start
 
 ```bash
-# Basic training (uses default paths: checkpoints/oasis500m.safetensors and checkpoints/vit-l-20.safetensors)
+# Basic training (uses default HuggingFace cache paths)
 python train.py --data-dir ../open-oasis/sample_data
 
 # With custom reward weights
@@ -111,7 +110,7 @@ python train.py \
     --adv-estimator grpo \
     --use-wandb
 
-# With custom model paths (if saved elsewhere)
+# With custom model paths (if models are in a different location)
 python train.py \
     --oasis-ckpt /path/to/oasis500m.safetensors \
     --vae-ckpt /path/to/vit-l-20.safetensors

@@ -39,7 +39,7 @@ def main():
     from transformers import CLIPModel, CLIPProcessor
     clip_dir = OUTPUT_DIR / "clip-vit-large-patch14"
     CLIPModel.from_pretrained("openai/clip-vit-large-patch14").save_pretrained(str(clip_dir))
-    CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14").save_pretrained(str(clip_dir))
+    CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14", use_fast=True).save_pretrained(str(clip_dir))
     print(f"  Saved to {clip_dir}")
 
     # 2. Aesthetic Predictor

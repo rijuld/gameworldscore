@@ -40,7 +40,7 @@ class TemporalConsistencyReward(nn.Module):
         
         # Load CLIP model
         self.clip_model = CLIPModel.from_pretrained(clip_model_path)
-        self.clip_processor = CLIPProcessor.from_pretrained(clip_model_path)
+        self.clip_processor = CLIPProcessor.from_pretrained(clip_model_path, use_fast=True)
         self.clip_model = self.clip_model.to(device).eval()
         
         # Freeze CLIP

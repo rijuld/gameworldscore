@@ -136,7 +136,7 @@ class AestheticQualityReward(nn.Module):
         # Load CLIP for aesthetic prediction embeddings
         from transformers import CLIPModel, CLIPProcessor
         self.clip_model = CLIPModel.from_pretrained(clip_model_path)
-        self.clip_processor = CLIPProcessor.from_pretrained(clip_model_path)
+        self.clip_processor = CLIPProcessor.from_pretrained(clip_model_path, use_fast=True)
         self.clip_model = self.clip_model.to(device).eval()
         
         for param in self.clip_model.parameters():

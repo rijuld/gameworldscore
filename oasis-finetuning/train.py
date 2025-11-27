@@ -92,8 +92,8 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=4,
-        help="Training batch size (need >1 for GRPO)",
+        default=2,
+        help="Training batch size (need >1 for GRPO, 4 may OOM)",
     )
     parser.add_argument(
         "--n-prompt-frames",
@@ -104,8 +104,8 @@ def parse_args():
     parser.add_argument(
         "--max-gen-frames",
         type=int,
-        default=8,
-        help="Maximum frames to generate per rollout (reduce for memory)",
+        default=4,
+        help="Maximum frames to generate per rollout (reduced to prevent OOM)",
     )
     
     # Training

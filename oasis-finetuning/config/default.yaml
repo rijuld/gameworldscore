@@ -22,11 +22,11 @@ data:
   # MiDaS-60 Minecraft block dataset
   data_dir: "Dataset/MiDaS-60_small"
   dataset_type: "auto"  # auto, video, or midas
-  train_batch_size: 4  # Need >1 for GRPO to work
+  train_batch_size: 2  # Need >1 for GRPO, but 4 may OOM on 40GB GPU
   val_batch_size: 2
   clip_length: 16
   n_prompt_frames: 1
-  max_gen_frames: 8  # Reduced for memory
+  max_gen_frames: 4  # Reduced further to prevent OOM
   frame_size: [360, 640]
   num_workers: 4
   # For MiDaS dataset: sample frames from same category for consistency

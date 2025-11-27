@@ -61,13 +61,13 @@ class OasisPPOConfig:
     # Training settings
     total_epochs: int = 10
     total_training_steps: int = 10000
-    train_batch_size: int = 4  # Need >1 for GRPO to work properly
+    train_batch_size: int = 2  # Need >1 for GRPO, but 4 uses too much memory
     ppo_mini_batch_size: int = 4
     ppo_epochs: int = 1
     
     # Rollout settings
     n_prompt_frames: int = 1
-    max_gen_frames: int = 8
+    max_gen_frames: int = 4  # Reduced to prevent OOM
     n_rollouts: int = 1
     
     # PPO hyperparameters
@@ -369,12 +369,13 @@ class OasisPPOTrainer:
         Returns:
             rewards: (B, num_gen) rewards for each generated frame
         """
-        # Use GameWorldScore reward
-        rewards, info = self.reward_fn.compute_sequence_reward(
-            all_frames,
-            actions,
-            return_per_frame=True,
-        )
+        # Use GameWorldScore reward (no grad needed for reward computation)
+        with torch.no_grad():
+            rewards, info = self.reward_fn.compute_sequence_reward(
+                all_frames,
+                actions,
+                return_per_frame=True,
+            )
         
         return rewards, info
     
@@ -599,6 +600,10 @@ class OasisPPOTrainer:
         """
         import time
         
+        # Clear GPU cache at start of each step to prevent OOM
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         # Handle both new format (initial_frame) and old format (frames)
         if 'initial_frame' in batch:
             # New format: only first frame provided
@@ -632,6 +637,10 @@ class OasisPPOTrainer:
         #   - all_frames: (B, T+1, C, H, W) - initial + generated
         #   - log_probs: (B, T) - for PPO update
         
+        # Clear cache after generation before reward computation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         # ============================================================
         # STEP 2: Compute rewards on GENERATED frames (ground-truth free)
         # ============================================================
@@ -645,6 +654,10 @@ class OasisPPOTrainer:
         
         torch.cuda.synchronize() if torch.cuda.is_available() else None
         reward_time = time.perf_counter() - reward_start
+        
+        # Clear cache after reward computation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         # Print reward timing breakdown
         rik_time = reward_info.get('time_rik_sec', 0)

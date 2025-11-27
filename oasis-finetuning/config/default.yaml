@@ -74,6 +74,11 @@ checkpoint:
   test_freq: 50
   checkpoint_dir: "checkpoints/oasis_ppo"
   max_checkpoints: 5
+
+# Video saving
+video:
+  save_freq: 50  # Save sample videos every N steps (0 to disable)
+  save_dir: "samples"  # Directory to save generated videos
   
 logging:
   project_name: "oasis_rl_finetuning"

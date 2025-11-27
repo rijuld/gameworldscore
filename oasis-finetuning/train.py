@@ -203,6 +203,20 @@ def parse_args():
         help="Resume training from checkpoint",
     )
     
+    # Video saving
+    parser.add_argument(
+        "--video-save-freq",
+        type=int,
+        default=50,
+        help="Save sample videos every N steps (0 to disable)",
+    )
+    parser.add_argument(
+        "--video-save-dir",
+        type=str,
+        default="samples",
+        help="Directory to save generated videos",
+    )
+    
     # Logging
     parser.add_argument(
         "--project-name",
@@ -318,6 +332,8 @@ def main():
         adv_estimator=args.adv_estimator,
         save_freq=args.save_freq,
         checkpoint_dir=args.checkpoint_dir,
+        video_save_freq=args.video_save_freq,
+        video_save_dir=args.video_save_dir,
         project_name=args.project_name,
         experiment_name=args.experiment_name,
         use_wandb=args.use_wandb and not args.no_wandb,

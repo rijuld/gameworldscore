@@ -43,6 +43,7 @@ from data.minecraft_dataset import (
 )
 from workers.oasis_actor import OasisActorWorker, OasisActorConfig
 from workers.oasis_rollout import OasisRolloutWorker, OasisRolloutConfig
+from utils.video_utils import frames_to_video
 
 
 @dataclass
@@ -95,6 +96,10 @@ class OasisPPOConfig:
     save_freq: int = 100
     test_freq: int = 50
     checkpoint_dir: str = "checkpoints/oasis_ppo"
+    
+    # Video saving
+    video_save_freq: int = 50  # Save sample videos every N steps
+    video_save_dir: str = "samples"  # Directory to save videos
     
     # Logging
     project_name: str = "oasis_rl_finetuning"
@@ -697,6 +702,10 @@ class OasisPPOTrainer:
                 if self.config.save_freq > 0 and self.global_step % self.config.save_freq == 0 and self.global_step > 0:
                     self.save_checkpoint()
                 
+                # Save sample video
+                if self.config.video_save_freq > 0 and self.global_step % self.config.video_save_freq == 0:
+                    self.save_sample_video(batch)
+                
                 self.global_step += 1
             
             # Epoch summary
@@ -731,6 +740,79 @@ class OasisPPOTrainer:
         print(f"Training Complete!")
         print(f"  Total steps: {self.global_step}")
         print(f"{'='*60}")
+    
+    def save_sample_video(
+        self,
+        batch: Dict[str, torch.Tensor],
+        suffix: str = "",
+    ) -> Optional[str]:
+        """
+        Save a sample generated video for visualization.
+        
+        Args:
+            batch: Training batch with initial_frame and actions
+            suffix: Optional suffix for filename
+            
+        Returns:
+            Path to saved video or None if failed
+        """
+        try:
+            # Get initial frame and actions
+            if 'initial_frame' in batch:
+                initial_frames = batch['initial_frame'].to(self.device)
+            else:
+                frames = batch['frames'].to(self.device)
+                initial_frames = frames[:, :self.config.n_prompt_frames]
+            
+            actions = batch['actions'].to(self.device)
+            
+            # Take only first sample from batch
+            initial_frames = initial_frames[:1]
+            actions = actions[:1, :self.config.max_gen_frames]
+            
+            # Generate video
+            self.policy.eval_mode()
+            with torch.no_grad():
+                generated_frames = self.policy.generate_sequence(
+                    initial_frames=initial_frames,
+                    actions=actions,
+                    num_frames=self.config.max_gen_frames,
+                )
+            
+            # Combine initial and generated frames: (1, T, C, H, W)
+            all_frames = torch.cat([initial_frames, generated_frames], dim=1)
+            
+            # Remove batch dimension: (T, C, H, W)
+            video_frames = all_frames[0]
+            
+            # Create output directory
+            video_dir = os.path.join(self.config.video_save_dir, self.config.experiment_name)
+            os.makedirs(video_dir, exist_ok=True)
+            
+            # Save video
+            filename = f"step_{self.global_step}{suffix}.mp4"
+            video_path = os.path.join(video_dir, filename)
+            
+            frames_to_video(video_frames, video_path, fps=10)
+            print(f"  Saved video: {video_path}")
+            
+            # Log to wandb if available
+            if self.logger is not None:
+                try:
+                    import wandb
+                    # Convert to format wandb expects
+                    video_np = (video_frames.permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)
+                    self.logger.log({
+                        "video/generated": wandb.Video(video_np, fps=10, format="mp4")
+                    }, step=self.global_step)
+                except Exception:
+                    pass  # wandb video logging is optional
+            
+            return video_path
+            
+        except Exception as e:
+            print(f"  Warning: Failed to save video: {e}")
+            return None
     
     def save_checkpoint(self, path: Optional[str] = None):
         """Save training checkpoint."""

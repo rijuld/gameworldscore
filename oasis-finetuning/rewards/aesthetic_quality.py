@@ -171,7 +171,10 @@ class AestheticQualityReward(nn.Module):
     def _preprocess_for_clip(self, images: torch.Tensor) -> torch.Tensor:
         """Preprocess images for CLIP."""
         images = F.interpolate(images, size=(224, 224), mode='bilinear', align_corners=False)
-        images = (images - self.mean) / self.std
+        # Ensure mean/std are on same device as images
+        mean = self.mean.to(images.device)
+        std = self.std.to(images.device)
+        images = (images - mean) / std
         return images
     
     @torch.no_grad()

@@ -70,8 +70,10 @@ class TemporalConsistencyReward(nn.Module):
         # Resize to CLIP input size
         images = F.interpolate(images, size=(224, 224), mode='bilinear', align_corners=False)
         
-        # Normalize
-        images = (images - self.mean) / self.std
+        # Normalize (ensure mean/std are on same device as images)
+        mean = self.mean.to(images.device)
+        std = self.std.to(images.device)
+        images = (images - mean) / std
         
         return images
     

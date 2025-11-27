@@ -830,8 +830,13 @@ class OasisPPOTrainer:
             Path to saved video or None if failed
         """
         try:
-            # Lazy import to avoid circular import issues
-            from utils.video_utils import frames_to_video
+            # Lazy import using direct path to avoid 'utils' package conflict
+            import sys
+            from pathlib import Path
+            utils_path = Path(__file__).parent.parent / "utils"
+            if str(utils_path) not in sys.path:
+                sys.path.insert(0, str(utils_path))
+            from video_utils import frames_to_video
             
             # Get initial frame and actions
             if 'initial_frame' in batch:

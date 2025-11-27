@@ -22,11 +22,11 @@ data:
   # MiDaS-60 Minecraft block dataset
   data_dir: "Dataset/MiDaS-60_small"
   dataset_type: "auto"  # auto, video, or midas
-  train_batch_size: 4
-  val_batch_size: 2
-  clip_length: 32
+  train_batch_size: 1  # Reduced for memory
+  val_batch_size: 1
+  clip_length: 16
   n_prompt_frames: 1
-  max_gen_frames: 31
+  max_gen_frames: 8  # Reduced for memory (was 31)
   frame_size: [360, 640]
   num_workers: 4
   # For MiDaS dataset: sample frames from same category for consistency
@@ -52,7 +52,7 @@ ppo:
   
 # KL regularization
 kl:
-  use_kl_in_reward: true
+  use_kl_in_reward: false  # Disabled to save memory (no reference model needed)
   kl_coeff: 0.001
   kl_target: 0.1
   adaptive_kl: true

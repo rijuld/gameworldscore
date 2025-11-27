@@ -127,20 +127,26 @@ class AestheticQualityReward(nn.Module):
         device: str = "cuda",
         musiq_weight: float = 0.5,
         aesthetic_weight: float = 0.5,
+        shared_clip_model: Optional[nn.Module] = None,  # Share CLIP to save memory
     ):
         super().__init__()
         self.device = device
         self.musiq_weight = musiq_weight
         self.aesthetic_weight = aesthetic_weight
         
-        # Load CLIP for aesthetic prediction embeddings
-        from transformers import CLIPModel, CLIPProcessor
-        self.clip_model = CLIPModel.from_pretrained(clip_model_path)
-        self.clip_processor = CLIPProcessor.from_pretrained(clip_model_path, use_fast=True)
-        self.clip_model = self.clip_model.to(device).eval()
-        
-        for param in self.clip_model.parameters():
-            param.requires_grad = False
+        # Use shared CLIP model if provided, otherwise load our own
+        if shared_clip_model is not None:
+            self.clip_model = shared_clip_model
+            self._owns_clip = False
+        else:
+            from transformers import CLIPModel, CLIPProcessor
+            self.clip_model = CLIPModel.from_pretrained(clip_model_path)
+            self.clip_processor = CLIPProcessor.from_pretrained(clip_model_path, use_fast=True)
+            self.clip_model = self.clip_model.to(device).eval()
+            self._owns_clip = True
+            
+            for param in self.clip_model.parameters():
+                param.requires_grad = False
         
         # CLIP normalization
         self.register_buffer(

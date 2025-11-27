@@ -61,13 +61,13 @@ class OasisPPOConfig:
     # Training settings
     total_epochs: int = 10
     total_training_steps: int = 10000
-    train_batch_size: int = 4
+    train_batch_size: int = 1
     ppo_mini_batch_size: int = 4
     ppo_epochs: int = 1
     
     # Rollout settings
     n_prompt_frames: int = 1
-    max_gen_frames: int = 31
+    max_gen_frames: int = 8
     n_rollouts: int = 1
     
     # PPO hyperparameters
@@ -79,7 +79,7 @@ class OasisPPOConfig:
     grad_clip: float = 1.0
     
     # KL settings
-    use_kl_in_reward: bool = True
+    use_kl_in_reward: bool = False
     kl_coeff: float = 0.001
     kl_target: float = 0.1
     

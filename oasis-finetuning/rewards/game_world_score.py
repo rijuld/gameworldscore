@@ -92,10 +92,12 @@ class GameWorldScoreReward(nn.Module):
             use_motion_smoothness=use_motion_smoothness,
         )
         
+        # Share CLIP model between RTC and RAQ to save ~1.7GB GPU memory
         self.raq = AestheticQualityReward(
             clip_model_path=clip_model_path,
             aesthetic_checkpoint=aesthetic_checkpoint,
             device=device,
+            shared_clip_model=self.rtc.clip_model,  # Reuse RTC's CLIP
         )
     
     @torch.no_grad()

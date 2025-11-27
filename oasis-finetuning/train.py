@@ -92,8 +92,8 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=4,
-        help="Training batch size",
+        default=1,
+        help="Training batch size (reduce for memory)",
     )
     parser.add_argument(
         "--n-prompt-frames",
@@ -104,8 +104,8 @@ def parse_args():
     parser.add_argument(
         "--max-gen-frames",
         type=int,
-        default=31,
-        help="Maximum frames to generate per rollout",
+        default=8,
+        help="Maximum frames to generate per rollout (reduce for memory)",
     )
     
     # Training
@@ -164,8 +164,8 @@ def parse_args():
     parser.add_argument(
         "--use-kl",
         action="store_true",
-        default=True,
-        help="Use KL penalty in reward",
+        default=False,
+        help="Use KL penalty in reward (requires loading reference model - more memory)",
     )
     parser.add_argument(
         "--kl-coeff",

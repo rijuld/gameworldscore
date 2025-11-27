@@ -10,10 +10,10 @@ model:
 # Reward model paths
 reward:
   models_dir: "models_for_rl_finetuning"
-  # GameWorldScore component weights
-  rik_weight: 1.0  # Inverse Kinematics (action fidelity)
-  rtc_weight: 1.0  # Temporal Consistency
-  raq_weight: 1.0  # Aesthetic Quality
+  # GameWorldScore component weights (all normalized to [0, 1])
+  rik_weight: 1.0  # Inverse Kinematics (action fidelity) - uses VPT IDM if available
+  rtc_weight: 1.0  # Temporal Consistency (CLIP similarity)
+  raq_weight: 1.0  # Aesthetic Quality (LAION aesthetic predictor)
   normalize_weights: true
   use_motion_smoothness: false
 
@@ -22,11 +22,11 @@ data:
   # MiDaS-60 Minecraft block dataset
   data_dir: "Dataset/MiDaS-60_small"
   dataset_type: "auto"  # auto, video, or midas
-  train_batch_size: 1  # Reduced for memory
-  val_batch_size: 1
+  train_batch_size: 4  # Need >1 for GRPO to work
+  val_batch_size: 2
   clip_length: 16
   n_prompt_frames: 1
-  max_gen_frames: 8  # Reduced for memory (was 31)
+  max_gen_frames: 8  # Reduced for memory
   frame_size: [360, 640]
   num_workers: 4
   # For MiDaS dataset: sample frames from same category for consistency
@@ -48,7 +48,7 @@ ppo:
   gamma: 0.99
   lam: 0.95
   clip_ratio: 0.2
-  entropy_coeff: 0.01
+  entropy_coeff: 0.01  # Entropy bonus for exploration
   
 # KL regularization
 kl:
@@ -59,7 +59,9 @@ kl:
   
 # Advantage estimation
 advantage:
-  estimator: "grpo"  # Options: "gae", "grpo", "reinforce_plus_plus", "rloo"
+  # reinforce_plus_plus is more stable with small batches
+  # grpo requires batch_size > 1 for normalization to work
+  estimator: "reinforce_plus_plus"  # Options: "gae", "grpo", "reinforce_plus_plus", "rloo"
   
 # Rollout configuration  
 rollout:
@@ -90,4 +92,3 @@ logging:
 device:
   cuda: true
   dtype: "float16"  # Options: "float16", "bfloat16", "float32"
-

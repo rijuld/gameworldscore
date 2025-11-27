@@ -61,7 +61,7 @@ class OasisPPOConfig:
     # Training settings
     total_epochs: int = 10
     total_training_steps: int = 10000
-    train_batch_size: int = 1
+    train_batch_size: int = 4  # Need >1 for GRPO to work properly
     ppo_mini_batch_size: int = 4
     ppo_epochs: int = 1
     
@@ -89,7 +89,7 @@ class OasisPPOConfig:
     raq_weight: float = 1.0
     
     # Advantage estimation
-    adv_estimator: str = "grpo"  # "gae", "grpo", "reinforce_plus_plus"
+    adv_estimator: str = "reinforce_plus_plus"  # "gae", "grpo", "reinforce_plus_plus" - GRPO needs batch>1
     
     # Checkpointing
     save_freq: int = 100
@@ -513,6 +513,12 @@ class OasisPPOTrainer:
             )
             pg_loss = torch.max(pg_loss1, pg_loss2)
             
+            # Entropy bonus for exploration
+            # For diffusion models, we approximate entropy using the negative log prob variance
+            # Higher variance in log_probs = more exploration
+            entropy = -log_probs.mean()  # Negative log prob as entropy proxy
+            entropy_loss = -self.config.entropy_coeff * entropy
+            
             # Apply mask if available
             if response_mask is not None:
                 mask = response_mask[:, :min_len].float()
@@ -520,12 +526,15 @@ class OasisPPOTrainer:
             else:
                 pg_loss = pg_loss.mean()
             
+            # Total loss = policy loss + entropy loss
+            total_loss = pg_loss + entropy_loss
+            
             # Backward pass with gradient scaling for mixed precision
             self.optimizer.zero_grad()
             
             # Scale loss for mixed precision stability
             if hasattr(self, 'grad_scaler'):
-                self.grad_scaler.scale(pg_loss).backward()
+                self.grad_scaler.scale(total_loss).backward()
                 self.grad_scaler.unscale_(self.optimizer)
                 
                 # Gradient clipping
@@ -540,7 +549,7 @@ class OasisPPOTrainer:
                 self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
             else:
-                pg_loss.backward()
+                total_loss.backward()
                 
                 # Gradient clipping
                 if self.config.grad_clip > 0:
@@ -559,6 +568,9 @@ class OasisPPOTrainer:
             
             # Record metrics
             metrics['pg_loss'].append(pg_loss.item())
+            metrics['entropy'].append(entropy.item())
+            metrics['entropy_loss'].append(entropy_loss.item())
+            metrics['total_loss'].append(total_loss.item())
             metrics['grad_norm'].append(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
             
             # Compute clip fraction

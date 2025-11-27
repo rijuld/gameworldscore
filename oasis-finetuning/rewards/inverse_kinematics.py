@@ -4,25 +4,39 @@ Inverse Kinematics Score (RIK) for action fidelity.
 Uses a pre-trained Inverse Dynamics Model (IDM) to verify that
 the generated frame transition is consistent with the intended action.
 
-The reward is the negative cross-entropy between the intended action
-and the IDM's predicted action from the generated transition.
+The reward is based on how well the IDM's predicted action matches
+the intended action from the generated transition.
+
+Supports:
+1. VPT IDM (OpenAI's Video Pre-Training model) - high quality
+2. SimpleIDM (fallback CNN) - for development/testing
 """
 
 import os
+import sys
+import pickle
+from pathlib import Path
 from typing import Optional, Tuple, Dict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import cv2
 
 
-class IDMModel(nn.Module):
+# Add VPT to path for imports
+VPT_PATH = Path(__file__).parent.parent.parent / "VPT"
+if VPT_PATH.exists() and str(VPT_PATH) not in sys.path:
+    sys.path.insert(0, str(VPT_PATH))
+
+
+class VPTIDMWrapper(nn.Module):
     """
-    Inverse Dynamics Model for Minecraft.
+    Wrapper around the VPT (Video Pre-Training) Inverse Dynamics Model.
     
-    Predicts the action taken between two consecutive frames.
-    Uses the VPT (Video Pre-Training) IDM architecture.
+    This loads the actual VPT IDM and provides a simplified interface
+    for computing action predictions from frame pairs.
     """
     
     def __init__(
@@ -33,53 +47,104 @@ class IDMModel(nn.Module):
     ):
         super().__init__()
         self.device = device
+        self._vpt_available = False
         
-        # Load the IDM model using the VPT format
-        self.model = self._load_idm_model(model_path, weights_path)
-        self.model = self.model.to(device).eval()
-        
-        # Freeze parameters
-        for param in self.model.parameters():
-            param.requires_grad = False
+        try:
+            from inverse_dynamics_model import IDMAgent
+            from agent import AGENT_RESOLUTION
+            
+            # Load model parameters from pickle
+            agent_parameters = pickle.load(open(model_path, "rb"))
+            net_kwargs = agent_parameters["model"]["args"]["net"]["args"]
+            pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
+            pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
+            
+            # Create IDM agent
+            self.agent = IDMAgent(
+                idm_net_kwargs=net_kwargs,
+                pi_head_kwargs=pi_head_kwargs,
+                device=device
+            )
+            self.agent.load_weights(weights_path)
+            self.agent_resolution = AGENT_RESOLUTION
+            self._vpt_available = True
+            print("  ✓ VPT IDM loaded successfully")
+            
+        except Exception as e:
+            print(f"  ✗ Failed to load VPT IDM: {e}")
+            print("  → Falling back to SimpleIDM")
+            self._vpt_available = False
     
-    def _load_idm_model(self, model_path: str, weights_path: str):
-        """
-        Load IDM model from VPT checkpoint format.
+    @property
+    def is_available(self):
+        return self._vpt_available
+    
+    def _preprocess_frames(self, frames: torch.Tensor) -> np.ndarray:
+        """Convert torch frames to numpy format expected by VPT."""
+        # frames: (B, C, H, W) in [0, 1] -> (B, H, W, C) in [0, 255] uint8
+        frames = frames.permute(0, 2, 3, 1)  # (B, H, W, C)
+        frames = (frames * 255).byte().cpu().numpy()
         
-        The IDM model architecture is defined in the .model file,
-        and weights are loaded from the .weights file.
-        """
-        # For now, create a simple CNN-based IDM
-        # In production, this would load the actual VPT IDM architecture
-        return SimpleIDM()
+        # Resize to agent resolution
+        resized = []
+        for frame in frames:
+            frame_resized = cv2.resize(
+                frame, 
+                (self.agent_resolution[0], self.agent_resolution[1]),
+                interpolation=cv2.INTER_LINEAR
+            )
+            resized.append(frame_resized)
+        
+        return np.stack(resized)
     
     @torch.no_grad()
-    def forward(
+    def predict_actions(
         self,
         frame_t: torch.Tensor,
         frame_t1: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Dict[str, np.ndarray]:
         """
-        Predict action probabilities from frame transition.
+        Predict actions from frame transition using VPT IDM.
         
         Args:
             frame_t: (B, C, H, W) frame at time t
             frame_t1: (B, C, H, W) frame at time t+1
             
         Returns:
-            action_logits: (B, num_actions) predicted action logits
+            Dict with 'buttons' and 'camera' predictions
         """
-        # Concatenate frames channel-wise
-        x = torch.cat([frame_t, frame_t1], dim=1)
-        logits = self.model(x)
-        return logits
+        if not self._vpt_available:
+            return None
+        
+        # Stack frames for VPT (it expects a sequence)
+        frames_t = self._preprocess_frames(frame_t)
+        frames_t1 = self._preprocess_frames(frame_t1)
+        
+        # VPT expects sequence of frames, predict for each pair
+        all_predictions = []
+        for i in range(len(frames_t)):
+            # Reset hidden state for each sample
+            self.agent.reset()
+            # Predict from pair of frames
+            frames_pair = np.stack([frames_t[i], frames_t1[i]])
+            pred = self.agent.predict_actions(frames_pair)
+            all_predictions.append(pred)
+        
+        # Aggregate predictions
+        result = {}
+        for key in all_predictions[0].keys():
+            # Take the second prediction (transition from t to t+1)
+            result[key] = np.stack([p[key][0, 1] if p[key].ndim > 1 else p[key][1] 
+                                   for p in all_predictions])
+        
+        return result
 
 
 class SimpleIDM(nn.Module):
     """
     Simple CNN-based IDM for development/testing.
     
-    In production, replace with the actual VPT IDM architecture.
+    This is a fallback when VPT IDM cannot be loaded.
     """
     
     def __init__(
@@ -117,10 +182,13 @@ class InverseKinematicsReward(nn.Module):
     """
     Computes the Inverse Kinematics Score (RIK) reward.
     
-    RIK = -CrossEntropy(IDM(s_t, s_{t+1}), a_t)
+    Uses either:
+    1. VPT IDM (if available) - trained on millions of Minecraft frames
+    2. SimpleIDM (fallback) - random untrained CNN
     
-    This measures how well the generated transition reflects
-    the intended action.
+    The reward is normalized to [0, 1]:
+    - 1 = perfect action prediction
+    - 0 = completely wrong prediction
     """
     
     def __init__(
@@ -133,17 +201,23 @@ class InverseKinematicsReward(nn.Module):
         super().__init__()
         self.device = device
         self.action_dim = action_dim
+        self.use_vpt = False
         
+        # Try to load VPT IDM first
         if idm_model_path is not None and idm_weights_path is not None:
-            self.idm = IDMModel(
-                model_path=idm_model_path,
-                weights_path=idm_weights_path,
-                device=device,
-            )
-        else:
-            # Use simple IDM for development
-            self.idm = SimpleIDM(num_actions=action_dim).to(device).eval()
-            for param in self.idm.parameters():
+            if os.path.exists(idm_model_path) and os.path.exists(idm_weights_path):
+                self.vpt_idm = VPTIDMWrapper(
+                    model_path=idm_model_path,
+                    weights_path=idm_weights_path,
+                    device=device,
+                )
+                self.use_vpt = self.vpt_idm.is_available
+        
+        # Fallback to SimpleIDM
+        if not self.use_vpt:
+            print("  Using SimpleIDM (fallback)")
+            self.simple_idm = SimpleIDM(num_actions=action_dim).to(device).eval()
+            for param in self.simple_idm.parameters():
                 param.requires_grad = False
     
     @torch.no_grad()
@@ -162,40 +236,97 @@ class InverseKinematicsReward(nn.Module):
             intended_action: (B, action_dim) one-hot encoded intended action
             
         Returns:
-            reward: (B,) RIK reward for each sample
+            reward: (B,) RIK reward in [0, 1]
             info: Dict with additional metrics
         """
         B = frame_t.shape[0]
         
-        # Predict action from transition
-        action_logits = self.idm(frame_t, frame_t1)
+        if self.use_vpt:
+            return self._compute_vpt_reward(frame_t, frame_t1, intended_action)
+        else:
+            return self._compute_simple_reward(frame_t, frame_t1, intended_action)
+    
+    def _compute_vpt_reward(
+        self,
+        frame_t: torch.Tensor,
+        frame_t1: torch.Tensor,
+        intended_action: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict]:
+        """Compute reward using VPT IDM."""
+        B = frame_t.shape[0]
         
-        # Compute cross-entropy with intended action
+        # Get VPT predictions
+        predictions = self.vpt_idm.predict_actions(frame_t, frame_t1)
+        
+        # Convert intended action to comparable format
         if intended_action.dim() == 1:
-            # Action indices
             action_idx = intended_action
         else:
-            # One-hot or continuous action
+            action_idx = intended_action.argmax(dim=-1)
+        
+        # VPT predicts buttons (binary) and camera (continuous)
+        # For simplicity, we compare the dominant action
+        # This is a simplified comparison - could be made more sophisticated
+        
+        buttons_pred = predictions.get('attack', np.zeros(B))
+        
+        # Simple reward: 1 if any predicted button matches intended action category
+        # This is a simplified heuristic
+        reward = torch.zeros(B, device=self.device)
+        
+        # Basic matching logic (can be improved)
+        for i in range(B):
+            # Check if intended action is attack and VPT predicts attack
+            if action_idx[i].item() == 0 and buttons_pred[i] > 0.5:
+                reward[i] = 1.0
+            elif action_idx[i].item() != 0 and buttons_pred[i] < 0.5:
+                reward[i] = 0.5  # Partial match for non-attack
+            else:
+                reward[i] = 0.2  # Base reward
+        
+        info = {
+            'rik_ce_loss': 0.0,  # Not applicable for VPT
+            'rik_accuracy': reward.mean().item(),
+            'rik_normalized': reward.mean().item(),
+            'rik_using_vpt': True,
+        }
+        
+        return reward, info
+    
+    def _compute_simple_reward(
+        self,
+        frame_t: torch.Tensor,
+        frame_t1: torch.Tensor,
+        intended_action: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict]:
+        """Compute reward using SimpleIDM (fallback)."""
+        B = frame_t.shape[0]
+        
+        # Concatenate frames channel-wise
+        x = torch.cat([frame_t, frame_t1], dim=1)
+        action_logits = self.simple_idm(x)
+        
+        # Get action indices
+        if intended_action.dim() == 1:
+            action_idx = intended_action
+        else:
             if intended_action.shape[-1] == self.action_dim:
-                # One-hot encoded - convert to indices
                 action_idx = intended_action.argmax(dim=-1)
             else:
-                # Continuous action space - use MSE instead
+                # Continuous action space - use MSE
                 action_pred = F.softmax(action_logits, dim=-1)
                 mse = F.mse_loss(action_pred, intended_action, reduction='none')
                 mse_per_sample = mse.mean(dim=-1)
-                # Normalize to [0, 1] using exp(-mse), where mse=0 -> 1, mse=inf -> 0
                 reward = torch.exp(-mse_per_sample)
                 return reward, {'rik_mse': mse_per_sample.mean().item()}
         
-        # Cross-entropy loss (lower is better)
+        # Cross-entropy loss
         ce_loss = F.cross_entropy(action_logits, action_idx, reduction='none')
         
         # Normalize to [0, 1] using exp(-ce_loss)
-        # ce_loss=0 (perfect) -> reward=1, ce_loss=inf -> reward=0
         reward = torch.exp(-ce_loss)
         
-        # Compute accuracy for logging
+        # Compute accuracy
         pred_action = action_logits.argmax(dim=-1)
         accuracy = (pred_action == action_idx).float().mean()
         
@@ -203,6 +334,7 @@ class InverseKinematicsReward(nn.Module):
             'rik_ce_loss': ce_loss.mean().item(),
             'rik_accuracy': accuracy.item(),
             'rik_normalized': reward.mean().item(),
+            'rik_using_vpt': False,
         }
         
         return reward, info
@@ -237,14 +369,15 @@ class InverseKinematicsReward(nn.Module):
                 actions[:, t],
             )
             rewards.append(reward)
-            ce_losses.append(info['rik_ce_loss'])
-            accuracies.append(info['rik_accuracy'])
+            ce_losses.append(info.get('rik_ce_loss', 0.0))
+            accuracies.append(info.get('rik_accuracy', 0.0))
         
         rewards = torch.stack(rewards, dim=1)
         
         info = {
             'rik_ce_loss': np.mean(ce_losses),
             'rik_accuracy': np.mean(accuracies),
+            'rik_using_vpt': self.use_vpt,
         }
         
         return rewards, info
@@ -271,4 +404,3 @@ def load_idm_from_vpt(
         idm_weights_path=weights_path,
         device=device,
     )
-

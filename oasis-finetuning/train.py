@@ -92,8 +92,8 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=1,
-        help="Training batch size (reduce for memory)",
+        default=4,
+        help="Training batch size (need >1 for GRPO)",
     )
     parser.add_argument(
         "--n-prompt-frames",
@@ -178,9 +178,9 @@ def parse_args():
     parser.add_argument(
         "--adv-estimator",
         type=str,
-        default="grpo",
+        default="reinforce_plus_plus",
         choices=["gae", "grpo", "reinforce_plus_plus", "rloo"],
-        help="Advantage estimator type",
+        help="Advantage estimator type (GRPO needs batch>1)",
     )
     
     # Checkpointing

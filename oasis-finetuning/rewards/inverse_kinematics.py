@@ -183,12 +183,17 @@ class InverseKinematicsReward(nn.Module):
                 # Continuous action space - use MSE instead
                 action_pred = F.softmax(action_logits, dim=-1)
                 mse = F.mse_loss(action_pred, intended_action, reduction='none')
-                reward = -mse.mean(dim=-1)
-                return reward, {'mse': mse.mean().item()}
+                mse_per_sample = mse.mean(dim=-1)
+                # Normalize to [0, 1] using exp(-mse), where mse=0 -> 1, mse=inf -> 0
+                reward = torch.exp(-mse_per_sample)
+                return reward, {'rik_mse': mse_per_sample.mean().item()}
         
-        # Cross-entropy loss (lower is better, so negate)
+        # Cross-entropy loss (lower is better)
         ce_loss = F.cross_entropy(action_logits, action_idx, reduction='none')
-        reward = -ce_loss
+        
+        # Normalize to [0, 1] using exp(-ce_loss)
+        # ce_loss=0 (perfect) -> reward=1, ce_loss=inf -> reward=0
+        reward = torch.exp(-ce_loss)
         
         # Compute accuracy for logging
         pred_action = action_logits.argmax(dim=-1)
@@ -197,6 +202,7 @@ class InverseKinematicsReward(nn.Module):
         info = {
             'rik_ce_loss': ce_loss.mean().item(),
             'rik_accuracy': accuracy.item(),
+            'rik_normalized': reward.mean().item(),
         }
         
         return reward, info

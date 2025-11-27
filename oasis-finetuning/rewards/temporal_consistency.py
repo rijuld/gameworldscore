@@ -166,20 +166,28 @@ class TemporalConsistencyReward(nn.Module):
             frame_t2: Optional (B, C, H, W) frame at time t+2 for motion smoothness
             
         Returns:
-            reward: (B,) RTC reward
+            reward: (B,) RTC reward normalized to [0, 1]
             info: Dict with metrics
         """
-        # CLIP similarity
+        # CLIP similarity (cosine similarity in [-1, 1])
         clip_sim = self.compute_clip_similarity(frame_t, frame_t1)
         
-        info = {'rtc_clip_similarity': clip_sim.mean().item()}
+        # Normalize from [-1, 1] to [0, 1]
+        clip_sim_normalized = (clip_sim + 1) / 2
         
-        reward = clip_sim
+        info = {
+            'rtc_clip_similarity': clip_sim.mean().item(),
+            'rtc_normalized': clip_sim_normalized.mean().item(),
+        }
+        
+        reward = clip_sim_normalized
         
         # Add motion smoothness if enabled and we have 3 frames
         if self.use_motion_smoothness and frame_t2 is not None:
             smoothness = self.compute_motion_smoothness(frame_t, frame_t1, frame_t2)
-            reward = (reward + smoothness) / 2
+            # Normalize smoothness to [0, 1] as well
+            smoothness_normalized = (smoothness + 1) / 2
+            reward = (reward + smoothness_normalized) / 2
             info['rtc_motion_smoothness'] = smoothness.mean().item()
         
         return reward, info

@@ -714,6 +714,12 @@ class OasisPPOTrainer:
         print(f"  Total steps: {self.config.total_training_steps}")
         print(f"  Batch size: {self.config.train_batch_size}")
         print(f"  Learning rate: {self.config.learning_rate}")
+        print(f"{'─'*60}")
+        print(f"  Reward Scales (all normalized to [0, 1]):")
+        print(f"    RIK (Action Fidelity):      w={self.config.rik_weight:.2f}  ideal→1.0")
+        print(f"    RTC (Temporal Consistency): w={self.config.rtc_weight:.2f}  ideal→1.0")
+        print(f"    RAQ (Aesthetic Quality):    w={self.config.raq_weight:.2f}  ideal→0.8")
+        print(f"  Expected total reward: 0.7-0.9 for good quality")
         print(f"{'='*60}\n")
         
         if self.train_dataloader is None:

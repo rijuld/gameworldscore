@@ -8,7 +8,13 @@ Combines three components from the Matrix-Game GameWorldScore benchmark:
 
 R_total = w1 * RIK + w2 * RTC + w3 * RAQ
 
-This reward function enables RL finetuning without ground-truth frames.
+All components are normalized to [0, 1] range:
+- RIK: exp(-cross_entropy_loss), where 1 = perfect action match
+- RTC: (cosine_similarity + 1) / 2, where 1 = identical frames
+- RAQ: sigmoid-normalized aesthetic/quality scores
+
+This enables meaningful weight combinations and consistent training.
+Ideal total reward: ~0.7-0.9 for well-trained models.
 """
 
 from typing import Dict, Tuple, Optional

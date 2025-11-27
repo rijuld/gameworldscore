@@ -236,17 +236,20 @@ class AestheticQualityReward(nn.Module):
         """
         Compute RAQ reward for a batch of frames.
         
+        Both aesthetic_score and quality_score are already normalized to [0, 1]
+        via sigmoid, so the combined reward is also in [0, 1].
+        
         Args:
             frame: (B, C, H, W) frames in [0, 1]
             
         Returns:
-            reward: (B,) RAQ reward
+            reward: (B,) RAQ reward in [0, 1]
             info: Dict with metrics
         """
-        aesthetic_score = self.compute_aesthetic_score(frame)
-        quality_score = self.compute_quality_score(frame)
+        aesthetic_score = self.compute_aesthetic_score(frame)  # [0, 1]
+        quality_score = self.compute_quality_score(frame)      # [0, 1]
         
-        # Weighted combination
+        # Weighted combination (both inputs in [0, 1], output in [0, 1])
         reward = (
             self.musiq_weight * quality_score +
             self.aesthetic_weight * aesthetic_score
@@ -255,6 +258,7 @@ class AestheticQualityReward(nn.Module):
         info = {
             'raq_aesthetic_score': aesthetic_score.mean().item(),
             'raq_quality_score': quality_score.mean().item(),
+            'raq_normalized': reward.mean().item(),
         }
         
         return reward, info

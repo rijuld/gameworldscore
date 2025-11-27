@@ -167,14 +167,21 @@ class GameWorldScoreReward(nn.Module):
             
         Returns:
             reward: (B,) or (B, T-1) total/per-frame rewards
-            info: Dict with aggregated metrics
+            info: Dict with aggregated metrics (includes timing)
         """
+        import time
+        
         B, T = frames.shape[:2]
         
         frame_rewards = []
         rik_rewards = []
         rtc_rewards = []
         raq_rewards = []
+        
+        # Timing accumulators
+        rik_time_total = 0.0
+        rtc_time_total = 0.0
+        raq_time_total = 0.0
         
         all_info = {
             'rik_ce_loss': [],
@@ -185,23 +192,51 @@ class GameWorldScoreReward(nn.Module):
         }
         
         for t in range(T - 1):
+            frame_t = frames[:, t]
+            frame_t1 = frames[:, t + 1]
+            action = actions[:, t]
             frame_t2 = frames[:, t + 2] if t + 2 < T else None
             
-            reward, info = self.compute_frame_reward(
-                frames[:, t],
-                frames[:, t + 1],
-                actions[:, t],
-                frame_t2,
+            # Time RIK
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            rik_start = time.perf_counter()
+            rik_reward, rik_info = self.rik.compute_reward(frame_t, frame_t1, action)
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            rik_time_total += time.perf_counter() - rik_start
+            
+            # Time RTC
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            rtc_start = time.perf_counter()
+            rtc_reward, rtc_info = self.rtc.compute_reward(frame_t, frame_t1, frame_t2)
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            rtc_time_total += time.perf_counter() - rtc_start
+            
+            # Time RAQ
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            raq_start = time.perf_counter()
+            raq_reward, raq_info = self.raq.compute_reward(frame_t1)
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            raq_time_total += time.perf_counter() - raq_start
+            
+            # Weighted combination
+            total_reward = (
+                self.weights.rik * rik_reward +
+                self.weights.rtc * rtc_reward +
+                self.weights.raq * raq_reward
             )
             
-            frame_rewards.append(reward)
-            rik_rewards.append(info['rik_reward'])
-            rtc_rewards.append(info['rtc_reward'])
-            raq_rewards.append(info['raq_reward'])
+            frame_rewards.append(total_reward)
+            rik_rewards.append(rik_reward.mean().item())
+            rtc_rewards.append(rtc_reward.mean().item())
+            raq_rewards.append(raq_reward.mean().item())
             
             for key in all_info:
-                if key in info:
-                    all_info[key].append(info[key])
+                if key.startswith('rik_') and key in rik_info:
+                    all_info[key].append(rik_info[key])
+                elif key.startswith('rtc_') and key in rtc_info:
+                    all_info[key].append(rtc_info[key])
+                elif key.startswith('raq_') and key in raq_info:
+                    all_info[key].append(raq_info[key])
         
         frame_rewards = torch.stack(frame_rewards, dim=1)  # (B, T-1)
         
@@ -211,6 +246,10 @@ class GameWorldScoreReward(nn.Module):
             'rik_reward': sum(rik_rewards) / len(rik_rewards),
             'rtc_reward': sum(rtc_rewards) / len(rtc_rewards),
             'raq_reward': sum(raq_rewards) / len(raq_rewards),
+            # Timing info
+            'time_rik_sec': rik_time_total,
+            'time_rtc_sec': rtc_time_total,
+            'time_raq_sec': raq_time_total,
         }
         
         for key, values in all_info.items():

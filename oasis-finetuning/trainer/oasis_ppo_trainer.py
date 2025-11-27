@@ -228,6 +228,10 @@ class OasisPPOTrainer:
             weight_decay=0.01,
         )
         
+        # Gradient scaler for mixed precision training
+        if self.device == "cuda":
+            self.grad_scaler = torch.cuda.amp.GradScaler()
+        
         # Learning rate scheduler
         if self.config.total_training_steps > 0:
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -468,6 +472,10 @@ class OasisPPOTrainer:
         
         metrics = defaultdict(list)
         
+        # Ensure tensors are float32 for stable training
+        old_log_probs = old_log_probs.float()
+        advantages = advantages.float()
+        
         for epoch in range(self.config.ppo_epochs):
             # Compute current log probs
             latents = self.policy.encode_frames(all_frames)
@@ -484,7 +492,7 @@ class OasisPPOTrainer:
                     action = torch.zeros(B, 1, actions.shape[-1], device=self.device)
                 
                 log_prob = self.policy.compute_log_prob(context, action, target)
-                log_probs.append(log_prob)
+                log_probs.append(log_prob.float())  # Ensure float32
             
             log_probs = torch.stack(log_probs, dim=1)
             
@@ -494,7 +502,7 @@ class OasisPPOTrainer:
             old_log_probs_batch = old_log_probs[:, :min_len]
             advantages_batch = advantages[:, :min_len]
             
-            # PPO loss
+            # PPO loss (computed in float32)
             ratio = torch.exp(log_probs - old_log_probs_batch)
             
             pg_loss1 = -advantages_batch * ratio
@@ -507,25 +515,43 @@ class OasisPPOTrainer:
             
             # Apply mask if available
             if response_mask is not None:
-                mask = response_mask[:, :min_len]
+                mask = response_mask[:, :min_len].float()
                 pg_loss = (pg_loss * mask).sum() / (mask.sum() + 1e-8)
             else:
                 pg_loss = pg_loss.mean()
             
-            # Backward pass
+            # Backward pass with gradient scaling for mixed precision
             self.optimizer.zero_grad()
-            pg_loss.backward()
             
-            # Gradient clipping
-            if self.config.grad_clip > 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.policy.get_trainable_parameters(),
-                    self.config.grad_clip,
-                )
+            # Scale loss for mixed precision stability
+            if hasattr(self, 'grad_scaler'):
+                self.grad_scaler.scale(pg_loss).backward()
+                self.grad_scaler.unscale_(self.optimizer)
+                
+                # Gradient clipping
+                if self.config.grad_clip > 0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.policy.get_trainable_parameters(),
+                        self.config.grad_clip,
+                    )
+                else:
+                    grad_norm = 0.0
+                
+                self.grad_scaler.step(self.optimizer)
+                self.grad_scaler.update()
             else:
-                grad_norm = 0.0
-            
-            self.optimizer.step()
+                pg_loss.backward()
+                
+                # Gradient clipping
+                if self.config.grad_clip > 0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.policy.get_trainable_parameters(),
+                        self.config.grad_clip,
+                    )
+                else:
+                    grad_norm = 0.0
+                
+                self.optimizer.step()
             
             # Update scheduler
             if self.scheduler is not None:

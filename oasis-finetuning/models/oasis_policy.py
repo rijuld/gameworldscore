@@ -323,14 +323,16 @@ class OasisPolicy(nn.Module):
         with autocast(self.device, dtype=self.dtype):
             v_pred = self.dit(x, t, actions)
         
-        # Compute target velocity
+        # Compute target velocity (ensure same dtype as v_pred)
         v_target = alpha.sqrt() * noise - (1 - alpha).sqrt() * target_latents
+        v_target = v_target.to(v_pred.dtype)
         
         # MSE loss as negative log probability proxy
-        mse = F.mse_loss(v_pred[:, -1:], v_target, reduction='none')
+        # Use float32 for stable loss computation
+        mse = F.mse_loss(v_pred[:, -1:].float(), v_target.float(), reduction='none')
         mse = mse.view(B, -1).mean(dim=-1)
         
-        # Convert to log prob (negative loss)
+        # Convert to log prob (negative loss) - keep as float32
         log_probs = -mse
         
         return log_probs

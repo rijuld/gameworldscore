@@ -33,16 +33,16 @@ except ImportError:
     RLVR_AVAILABLE = False
     DataProto = None
 
-from ..models.oasis_policy import OasisPolicy
-from ..rewards.game_world_score import GameWorldScoreReward, create_game_world_score_reward
-from ..data.minecraft_dataset import (
+from models.oasis_policy import OasisPolicy
+from rewards.game_world_score import GameWorldScoreReward, create_game_world_score_reward
+from data.minecraft_dataset import (
     MinecraftDataset,
     MiDaSMinecraftDataset,
     create_minecraft_dataloader,
     create_midas_dataloaders,
 )
-from ..workers.oasis_actor import OasisActorWorker, OasisActorConfig
-from ..workers.oasis_rollout import OasisRolloutWorker, OasisRolloutConfig
+from workers.oasis_actor import OasisActorWorker, OasisActorConfig
+from workers.oasis_rollout import OasisRolloutWorker, OasisRolloutConfig
 
 
 @dataclass

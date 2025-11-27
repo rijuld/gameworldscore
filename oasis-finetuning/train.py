@@ -29,6 +29,11 @@ import argparse
 from pathlib import Path
 from pprint import pprint
 
+# Add the oasis-finetuning directory to sys.path for proper imports
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 import torch
 
 

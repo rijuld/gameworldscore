@@ -29,7 +29,7 @@ except ImportError:
     DataProto = None
     BasePPOActor = object
 
-from ..models.oasis_policy import OasisPolicy
+from models.oasis_policy import OasisPolicy
 
 
 @dataclass

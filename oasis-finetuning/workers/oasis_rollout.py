@@ -24,8 +24,8 @@ try:
 except ImportError:
     DataProto = None
 
-from ..models.oasis_policy import OasisPolicy
-from ..rewards.game_world_score import GameWorldScoreReward
+from models.oasis_policy import OasisPolicy
+from rewards.game_world_score import GameWorldScoreReward
 
 
 @dataclass

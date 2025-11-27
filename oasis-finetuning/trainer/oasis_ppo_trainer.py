@@ -784,12 +784,16 @@ class OasisPPOTrainer:
                 for k, v in metrics.items():
                     epoch_metrics[k].append(v)
                 
-                # Update progress bar with current metrics
+                # Update progress bar with current metrics including sub-rewards
                 epoch_pbar.set_postfix({
                     'step': self.global_step,
-                    'reward': f"{metrics.get('reward/mean', 0):.3f}",
-                    'gen': f"{metrics.get('time/generation_sec', 0):.1f}s",
-                    'rew': f"{metrics.get('time/reward_total_sec', 0):.1f}s",
+                    'loss': f"{metrics.get('train/total_loss', 0):.4f}",
+                    'grad': f"{metrics.get('train/grad_norm', 0):.2f}",
+                    'clip': f"{metrics.get('train/clip_fraction', 0):.2f}",
+                    'R': f"{metrics.get('reward/mean', 0):.3f}",
+                    'RIK': f"{metrics.get('reward/rik_reward', 0):.2f}",
+                    'RTC': f"{metrics.get('reward/rtc_reward', 0):.2f}",
+                    'RAQ': f"{metrics.get('reward/raq_reward', 0):.2f}",
                 })
                 
                 # Logging to wandb
@@ -810,9 +814,9 @@ class OasisPPOTrainer:
             if epoch_metrics:
                 avg_reward = np.mean(epoch_metrics.get('reward/mean', [0]))
                 avg_loss = np.mean(epoch_metrics.get('train/pg_loss', [0]))
-                avg_rik = np.mean(epoch_metrics.get('reward/rik', [0]))
-                avg_rtc = np.mean(epoch_metrics.get('reward/rtc', [0]))
-                avg_raq = np.mean(epoch_metrics.get('reward/raq', [0]))
+                avg_rik = np.mean(epoch_metrics.get('reward/rik_reward', [0]))
+                avg_rtc = np.mean(epoch_metrics.get('reward/rtc_reward', [0]))
+                avg_raq = np.mean(epoch_metrics.get('reward/raq_reward', [0]))
                 
                 print(f"\n  Epoch {epoch + 1} Summary:")
                 print(f"    Steps completed: {len(epoch_metrics.get('reward/mean', []))}")

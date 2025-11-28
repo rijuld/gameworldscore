@@ -734,9 +734,11 @@ class OasisGRPOTrainer:
         target_actions = actions[:, :self.config.max_gen_frames]
         
         # 1. Generate rollouts (with group repetition)
+        print(f"  [Profile] Starting Rollout Generation...")
         gen_start = time.perf_counter()
         rollout_data = self._generate_rollouts(initial_frames, target_actions)
         gen_time = time.perf_counter() - gen_start
+        print(f"  [Profile] Generation finished in {gen_time:.2f}s")
         
         # Delete initial_frames after rollout generation
         del initial_frames, target_actions
@@ -744,20 +746,33 @@ class OasisGRPOTrainer:
             torch.cuda.empty_cache()
         
         # 2. Compute rewards
+        print(f"  [Profile] Starting Reward Computation...")
         reward_start = time.perf_counter()
         rewards, reward_info = self._compute_rewards(
             rollout_data['all_frames'],
             rollout_data['actions'],
         )
         reward_time = time.perf_counter() - reward_start
+        print(f"  [Profile] Reward computation finished in {reward_time:.2f}s")
+        
+        # Print detailed reward breakdown immediately
+        print(f"  [Rewards] Mean Total: {rewards.mean().item():.4f}")
+        if 'reward/rik' in reward_info:
+            print(f"    RIK (Inverse Kinematics): {reward_info.get('reward/rik', 0):.4f}")
+        if 'reward/rtc' in reward_info:
+            print(f"    RTC (Temporal Consistency): {reward_info.get('reward/rtc', 0):.4f}")
+        if 'reward/raq' in reward_info:
+            print(f"    RAQ (Aesthetic Quality): {reward_info.get('reward/raq', 0):.4f}")
         
         # 3. Compute advantages (GRPO)
+        print(f"  [Profile] Starting Advantage Computation...")
         adv_start = time.perf_counter()
         advantages, adv_info = self._compute_advantages(
             rewards,
             rollout_data['indices'],
         )
         adv_time = time.perf_counter() - adv_start
+        print(f"  [Profile] Advantage computation finished in {adv_time:.2f}s")
         
         # Save reward statistics before deleting
         reward_mean = rewards.mean().item()
@@ -767,6 +782,7 @@ class OasisGRPOTrainer:
         del rewards
         
         # 4. Update policy
+        print(f"  [Profile] Starting GRPO Update...")
         grpo_start = time.perf_counter()
         update_metrics = self._grpo_update(
             rollout_data['all_frames'],
@@ -775,6 +791,7 @@ class OasisGRPOTrainer:
             advantages,
         )
         grpo_time = time.perf_counter() - grpo_start
+        print(f"  [Profile] GRPO Update finished in {grpo_time:.2f}s")
         
         # Clean up rollout data
         del rollout_data, advantages

@@ -25,8 +25,17 @@ import numpy as np
 import cv2
 
 
+# Install minerl mock before VPT imports (VPT has minerl as transitive dependency
+# but we only need the IDM which doesn't actually use minerl functionality)
+try:
+    from utils.minerl_mock import install_mock
+    install_mock()
+except ImportError:
+    pass  # Mock not available, real minerl may be installed
+
 # Add VPT to path for imports
-VPT_PATH = Path(__file__).parent.parent.parent / "VPT"
+# VPT_PATH can be overridden via environment variable
+VPT_PATH = Path(os.environ.get("VPT_PATH", Path(__file__).parent.parent.parent / "VPT"))
 if VPT_PATH.exists() and str(VPT_PATH) not in sys.path:
     sys.path.insert(0, str(VPT_PATH))
 
@@ -200,11 +209,14 @@ class InverseKinematicsReward(nn.Module):
         idm_weights_path: Optional[str] = None,
         device: str = "cuda",
         action_dim: int = 25,
+        require_vpt: bool = True,
     ):
         super().__init__()
         self.device = device
         self.action_dim = action_dim
         self.use_vpt = False
+        self.simple_idm = None
+        self.vpt_idm = None
         
         # Resolve default paths relative to project root
         project_root = Path(__file__).parent.parent
@@ -230,9 +242,14 @@ class InverseKinematicsReward(nn.Module):
             print("      https://openaipublic.blob.core.windows.net/minecraft-rl/idm/4x_idm.model")
             print("      https://openaipublic.blob.core.windows.net/minecraft-rl/idm/4x_idm.weights")
             print()
-            raise FileNotFoundError(
-                f"VPT IDM files not found. Run 'python download_vpt_idm.py' to download them."
-            )
+            if require_vpt:
+                raise FileNotFoundError(
+                    f"VPT IDM files not found. Run 'python download_vpt_idm.py' to download them."
+                )
+            else:
+                print("  → Using SimpleIDM fallback (less accurate)")
+                self._init_simple_idm()
+                return
         
         # Load VPT IDM
         self.vpt_idm = VPTIDMWrapper(
@@ -242,12 +259,31 @@ class InverseKinematicsReward(nn.Module):
         )
         
         if not self.vpt_idm.is_available:
-            raise RuntimeError(
-                "Failed to load VPT IDM. Check that VPT repo is cloned and dependencies installed."
-            )
+            if require_vpt:
+                raise RuntimeError(
+                    "Failed to load VPT IDM. Check that VPT repo is cloned and dependencies installed.\n"
+                    "  Option 1: Clone VPT repo to project root:\n"
+                    "      git clone https://github.com/openai/Video-Pre-Training.git VPT\n"
+                    "  Option 2: Set VPT_PATH environment variable:\n"
+                    "      export VPT_PATH=/path/to/VPT\n"
+                    "  Option 3: Set require_vpt=False in config to use SimpleIDM fallback"
+                )
+            else:
+                print("  → Using SimpleIDM fallback (less accurate)")
+                self._init_simple_idm()
+                return
         
         self.use_vpt = True
         print("  ✓ VPT IDM loaded successfully for RIK reward")
+    
+    def _init_simple_idm(self):
+        """Initialize SimpleIDM as fallback."""
+        self.simple_idm = SimpleIDM(
+            in_channels=6,
+            num_actions=self.action_dim,
+        ).to(self.device)
+        self.use_vpt = False
+        print("  ✓ SimpleIDM initialized as fallback")
     
     @torch.no_grad()
     def compute_reward(
@@ -268,7 +304,10 @@ class InverseKinematicsReward(nn.Module):
             reward: (B,) RIK reward in [0, 1]
             info: Dict with additional metrics
         """
-        return self._compute_vpt_reward(frame_t, frame_t1, intended_action)
+        if self.use_vpt:
+            return self._compute_vpt_reward(frame_t, frame_t1, intended_action)
+        else:
+            return self._compute_simple_reward(frame_t, frame_t1, intended_action)
     
     def _compute_vpt_reward(
         self,

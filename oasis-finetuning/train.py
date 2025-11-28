@@ -159,6 +159,17 @@ def parse_args():
         default=1.0,
         help="Weight for RAQ (aesthetic quality) reward",
     )
+    parser.add_argument(
+        "--require-vpt",
+        action="store_true",
+        default=True,
+        help="Require VPT IDM for RIK reward (error if unavailable)",
+    )
+    parser.add_argument(
+        "--no-require-vpt",
+        action="store_true",
+        help="Use SimpleIDM fallback when VPT is unavailable",
+    )
     
     # KL regularization
     parser.add_argument(
@@ -327,6 +338,7 @@ def main():
         rik_weight=args.rik_weight,
         rtc_weight=args.rtc_weight,
         raq_weight=args.raq_weight,
+        require_vpt=args.require_vpt and not args.no_require_vpt,
         use_kl_in_reward=args.use_kl and not args.no_wandb,
         kl_coeff=args.kl_coeff,
         adv_estimator=args.adv_estimator,

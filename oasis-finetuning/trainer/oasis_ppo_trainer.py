@@ -87,6 +87,7 @@ class OasisPPOConfig:
     rik_weight: float = 1.0  # Requires VPT IDM (python download_vpt_idm.py)
     rtc_weight: float = 1.0
     raq_weight: float = 1.0
+    require_vpt: bool = True  # Set to False to use SimpleIDM fallback
     
     # Advantage estimation
     adv_estimator: str = "reinforce_plus_plus"  # "gae", "grpo", "reinforce_plus_plus" - GRPO needs batch>1
@@ -175,6 +176,7 @@ class OasisPPOTrainer:
             rik_weight=self.config.rik_weight,
             rtc_weight=self.config.rtc_weight,
             raq_weight=self.config.raq_weight,
+            require_vpt=self.config.require_vpt,
         )
     
     def _init_dataloader(self):

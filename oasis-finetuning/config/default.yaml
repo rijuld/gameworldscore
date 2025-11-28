@@ -13,6 +13,8 @@ reward:
   # VPT IDM paths (download with: python download_reward_models.py)
   idm_model_path: "models_for_rl_finetuning/4x_idm.model"
   idm_weights_path: "models_for_rl_finetuning/4x_idm.weights"
+  # Set to false to use SimpleIDM fallback when VPT cannot be loaded
+  require_vpt: true
   # GameWorldScore component weights (all normalized to [0, 1])
   rik_weight: 1.0  # Inverse Kinematics (action fidelity) - requires VPT IDM
   rtc_weight: 1.0  # Temporal Consistency (CLIP similarity)

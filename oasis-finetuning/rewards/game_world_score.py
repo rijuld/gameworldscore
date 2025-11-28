@@ -75,6 +75,7 @@ class GameWorldScoreReward(nn.Module):
         device: str = "cuda",
         action_dim: int = 25,
         use_motion_smoothness: bool = False,
+        require_vpt: bool = True,
     ):
         super().__init__()
         self.device = device
@@ -90,6 +91,7 @@ class GameWorldScoreReward(nn.Module):
             idm_weights_path=idm_weights_path,
             device=device,
             action_dim=action_dim,
+            require_vpt=require_vpt,
         )
         
         self.rtc = TemporalConsistencyReward(
@@ -318,6 +320,7 @@ def create_game_world_score_reward(
     rik_weight: float = 1.0,
     rtc_weight: float = 1.0,
     raq_weight: float = 1.0,
+    require_vpt: bool = True,
 ) -> GameWorldScoreReward:
     """
     Create GameWorldScore reward with models from the specified directory.
@@ -334,6 +337,8 @@ def create_game_world_score_reward(
         rik_weight: Weight for RIK component
         rtc_weight: Weight for RTC component
         raq_weight: Weight for RAQ component
+        require_vpt: If True, raise error when VPT IDM cannot be loaded.
+                     If False, fall back to SimpleIDM (less accurate).
         
     Returns:
         GameWorldScoreReward instance
@@ -353,7 +358,7 @@ def create_game_world_score_reward(
     idm_model_path = os.path.join(models_dir, "4x_idm.model")
     idm_weights_path = os.path.join(models_dir, "4x_idm.weights")
     
-    # If not found, InverseKinematicsReward will raise an error with download instructions
+    # If not found and require_vpt=True, InverseKinematicsReward will raise an error
     
     return GameWorldScoreReward(
         idm_model_path=idm_model_path,
@@ -364,5 +369,6 @@ def create_game_world_score_reward(
         rtc_weight=rtc_weight,
         raq_weight=raq_weight,
         device=device,
+        require_vpt=require_vpt,
     )
 

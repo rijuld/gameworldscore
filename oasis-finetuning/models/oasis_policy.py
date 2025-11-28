@@ -287,7 +287,6 @@ class OasisPolicy(nn.Module):
         use_fixed_timestep: bool = True,
         fixed_timestep: int = 100,
         noise: Optional[torch.Tensor] = None,
-        sample_seed: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Compute log probability of target latents given context.
@@ -295,9 +294,8 @@ class OasisPolicy(nn.Module):
         This approximates the log probability using the diffusion loss,
         which serves as a proxy for the true log probability in latent space.
         
-        CRITICAL: For stable GRPO/PPO training, noise must be deterministic.
-        If noise is not provided, it will be generated deterministically based on
-        sample_seed or a hash of the target latents.
+        IMPORTANT: For stable GRPO/PPO training, use fixed timesteps to ensure
+        consistent log probability computation between rollout and update phases.
         
         Args:
             latents: (B, T, C, H, W) context latent frames  
@@ -306,8 +304,8 @@ class OasisPolicy(nn.Module):
             timesteps: Optional specific timesteps to evaluate at
             use_fixed_timestep: If True, use fixed timestep for consistency
             fixed_timestep: The fixed timestep to use (default 100, ~10% noise)
-            noise: Optional pre-computed noise (for consistency between rollout/update)
-            sample_seed: Optional seed for deterministic noise generation
+            noise: Optional (B, 1, C, H, W) noise tensor. If provided, uses this exact noise.
+                   If None, generates random noise (WARNING: random noise breaks PPO/GRPO updates!)
             
         Returns:
             log_probs: (B,) log probability scores (normalized to reasonable range)
@@ -326,31 +324,15 @@ class OasisPolicy(nn.Module):
                     (B,), device=self.device
                 )
         
-        # CRITICAL FIX: Generate deterministic noise for consistent log probs
-        # This ensures the same target_latents gets the same noise during rollout and update
-        if noise is None:
-            # Generate deterministic noise based on target latents hash or seed
-            # Use a hash of target latents to ensure same noise for same target
-            if sample_seed is not None:
-                # Use provided seed for reproducibility
-                generator = torch.Generator(device=self.device)
-                generator.manual_seed(sample_seed)
-                # torch.randn_like doesn't support generator, use torch.randn with shape
-                noise = torch.randn(target_latents.shape, device=target_latents.device, dtype=target_latents.dtype, generator=generator)
-            else:
-                # Generate deterministic noise from target latents hash
-                # This ensures same target -> same noise
-                # Use quantized hash to be robust to small numerical differences
-                # Round to 4 decimal places to handle floating point precision issues
-                target_quantized = (target_latents.flatten()[:100] * 10000).round() / 10000
-                target_hash = target_quantized.sum().item()
-                # Convert to integer seed (use abs and mod to ensure positive)
-                target_seed = int(abs(target_hash * 1e6)) % (2**31)
-                generator = torch.Generator(device=self.device)
-                generator.manual_seed(target_seed)
-                # torch.randn_like doesn't support generator, use torch.randn with shape
-                noise = torch.randn(target_latents.shape, device=target_latents.device, dtype=target_latents.dtype, generator=generator)
-        
+        # Use provided noise or generate new random noise
+        # CRITICAL: For PPO/GRPO, noise MUST be consistent between rollout and update!
+        if noise is not None:
+            # Ensure noise is on correct device
+            if noise.device != self.device:
+                noise = noise.to(self.device)
+        else:
+            noise = torch.randn_like(target_latents)
+            
         alpha = self.alphas_cumprod[timesteps].view(B, 1, 1, 1, 1)
         
         noisy_target = alpha.sqrt() * target_latents + (1 - alpha).sqrt() * noise
@@ -377,14 +359,13 @@ class OasisPolicy(nn.Module):
         mse = mse.view(B, -1).mean(dim=-1)
         
         # Normalize MSE to a reasonable log probability range
-        # Adjusted scaling to keep log_probs in a more reasonable range [-10, 0]
-        # This prevents both old and new log probs from hitting the clamp boundary
+        # This prevents extreme values that cause exp() overflow
+        # Scale factor chosen empirically to keep log_probs in [-10, 0] range
         log_probs = -mse * 0.1  # Scale down to prevent overflow
         
-        # CRITICAL FIX: Less aggressive clamping to prevent clip_fraction = 0
-        # Only clamp extreme outliers, not normal values
-        # Changed from [-20, 0] to [-15, 5] to allow more range
-        log_probs = torch.clamp(log_probs, min=-15.0, max=5.0)
+        # Clamp to prevent extreme values
+        # Widened range to [-100, 0] to avoid zero gradients for poor models
+        log_probs = torch.clamp(log_probs, min=-100.0, max=0.0)
         
         return log_probs
     

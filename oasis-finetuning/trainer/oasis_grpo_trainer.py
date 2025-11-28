@@ -443,6 +443,13 @@ class OasisGRPOTrainer:
             # Delete initial_frames_repeated to free memory
             del initial_frames_repeated
             
+            # Pre-generate noise for all steps to ensure consistency
+            # Latent shape: (B*G, T, C, H, W)
+            # We need noise for (B*G, num_gen, C, H, W)
+            latent_shape = latents.shape
+            noise_shape = (latent_shape[0], num_gen, latent_shape[2], latent_shape[3], latent_shape[4])
+            all_noise = torch.randn(noise_shape, device=self.device, dtype=latents.dtype)
+            
             log_probs = []
             T_prompt = initial_frames.shape[1]
             
@@ -452,7 +459,10 @@ class OasisGRPOTrainer:
                 action_idx = t - T_prompt
                 action = actions_repeated[:, action_idx:action_idx+1]
                 
-                log_prob = self.policy.compute_log_prob(context, action, target)
+                # Get noise for this step
+                step_noise = all_noise[:, action_idx:action_idx+1]
+                
+                log_prob = self.policy.compute_log_prob(context, action, target, noise=step_noise)
                 log_probs.append(log_prob.detach())  # Detach to save memory
                 
                 # Clean up context and target
@@ -532,6 +542,34 @@ class OasisGRPOTrainer:
         actions_return = actions_repeated[:, :num_gen]
         if actions_return.device != self.device:
             actions_return = actions_return.to(self.device)
+            
+        # Generate noise for future updates (to ensure consistency)
+        # We need noise for each generated frame
+        # Shape: (B*G, num_gen, C, H/patch, W/patch)
+        # We can just generate it now and store it
+        # Note: We need to know the latent shape. 
+        # We can infer it from the log_probs computation or just generate it matching latents shape
+        # Since we deleted latents, we'll recreate the shape info
+        latent_h = all_frames.shape[-2] // self.policy.vae.patch_size
+        latent_w = all_frames.shape[-1] // self.policy.vae.patch_size
+        latent_c = 4 # Standard for Oasis VAE, but better to get from config if possible. 
+                     # However, we can just use torch.randn like in compute_log_prob
+        
+        # Actually, we should have captured the noise used during compute_log_prob above!
+        # But compute_log_prob generated it internally.
+        # To fix this properly without changing the flow too much:
+        # We will generate the noise HERE, and we should have passed it to compute_log_prob above.
+        # Since we didn't (in the loop above), the log_probs calculated above used random noise.
+        # This is fine for the "old_log_probs" as long as we save THAT noise and use it for "new_log_probs".
+        # WAIT: If we didn't pass noise above, compute_log_prob generated random noise and threw it away.
+        # We CANNOT recover that noise.
+        # FIX: We must generate noise BEFORE the loop above and pass it in.
+        
+        # RE-IMPLEMENTING THE LOOP WITH PRE-GENERATED NOISE
+        # (This replaces the loop logic in the original code, but since I'm editing the end of the function,
+        # I need to be careful. I will rewrite the loop part in a separate chunk or assume I can't change it easily here?
+        # No, I should rewrite the whole _generate_rollouts method or a large chunk of it.
+        # Let's rewrite the loop part in _generate_rollouts using a larger chunk.)
         
         return {
             'generated_frames': None,  # Don't keep generated_frames in memory
@@ -540,6 +578,7 @@ class OasisGRPOTrainer:
             'ref_log_probs': ref_log_probs,  # On GPU (if computed)
             'actions': actions_return,  # On GPU
             'indices': indices,  # On GPU
+            'noise': all_noise,  # Store noise for updates!
         }
     
     def _compute_rewards(
@@ -632,6 +671,7 @@ class OasisGRPOTrainer:
         actions: torch.Tensor,
         old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
+        noise: torch.Tensor,  # Added noise argument
         response_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, float]:
         """
@@ -699,6 +739,7 @@ class OasisGRPOTrainer:
                 mb_old_log_probs = old_log_probs[start_idx:end_idx]
                 mb_advantages = advantages[start_idx:end_idx]
                 mb_response_mask = response_mask[start_idx:end_idx]
+                mb_noise = noise[start_idx:end_idx]  # Get noise for this micro-batch
                 
                 # CRITICAL FIX: Always re-encode to allow gradients to flow
                 # The VAE encoder is frozen, but gradients need to flow through DiT
@@ -714,12 +755,15 @@ class OasisGRPOTrainer:
                     action_idx = t - T_prompt
                     action = mb_actions[:, action_idx:action_idx+1]
                     
+                    # Get noise for this step
+                    step_noise = mb_noise[:, action_idx:action_idx+1]
+
                     # Use mixed precision for log prob computation
                     if self.config.use_mixed_precision and self.device == "cuda":
                         with torch.amp.autocast('cuda'):
-                            log_prob = self.policy.compute_log_prob(context, action, target)
+                            log_prob = self.policy.compute_log_prob(context, action, target, noise=step_noise)
                     else:
-                        log_prob = self.policy.compute_log_prob(context, action, target)
+                        log_prob = self.policy.compute_log_prob(context, action, target, noise=step_noise)
                     
                     log_probs.append(log_prob)
                     
@@ -953,6 +997,7 @@ class OasisGRPOTrainer:
             rollout_actions,
             rollout_log_probs,
             advantages,
+            rollout_data['noise'],  # Pass the noise
         )
         grpo_time = time.perf_counter() - grpo_start
         
@@ -1027,7 +1072,7 @@ class OasisGRPOTrainer:
         # This ensures the learning rate schedule progresses correctly
         if self.scheduler is not None:
             self.scheduler.step()
-        
+            
         return metrics
     
     def fit(self):

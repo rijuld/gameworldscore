@@ -335,7 +335,8 @@ class OasisPolicy(nn.Module):
                 # Use provided seed for reproducibility
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sample_seed)
-                noise = torch.randn_like(target_latents, generator=generator)
+                # torch.randn_like doesn't support generator, use torch.randn with shape
+                noise = torch.randn(target_latents.shape, device=target_latents.device, dtype=target_latents.dtype, generator=generator)
             else:
                 # Generate deterministic noise from target latents hash
                 # This ensures same target -> same noise
@@ -347,7 +348,8 @@ class OasisPolicy(nn.Module):
                 target_seed = int(abs(target_hash * 1e6)) % (2**31)
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(target_seed)
-                noise = torch.randn_like(target_latents, generator=generator)
+                # torch.randn_like doesn't support generator, use torch.randn with shape
+                noise = torch.randn(target_latents.shape, device=target_latents.device, dtype=target_latents.dtype, generator=generator)
         
         alpha = self.alphas_cumprod[timesteps].view(B, 1, 1, 1, 1)
         

@@ -27,11 +27,56 @@ import cv2
 
 # Install minerl mock before VPT imports (VPT has minerl as transitive dependency
 # but we only need the IDM which doesn't actually use minerl functionality)
-try:
-    from utils.minerl_mock import install_mock
-    install_mock()
-except ImportError:
-    pass  # Mock not available, real minerl may be installed
+def _install_minerl_mock():
+    """Try to install minerl mock using various import methods."""
+    # Method 1: Try relative import
+    try:
+        from utils.minerl_mock import install_mock
+        install_mock()
+        return True
+    except ImportError:
+        pass
+    
+    # Method 2: Try absolute path import
+    try:
+        import importlib.util
+        mock_path = Path(__file__).parent.parent / "utils" / "minerl_mock.py"
+        if mock_path.exists():
+            spec = importlib.util.spec_from_file_location("minerl_mock", mock_path)
+            minerl_mock = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(minerl_mock)
+            minerl_mock.install_mock()
+            return True
+    except Exception:
+        pass
+    
+    # Method 3: Inline mock (last resort)
+    try:
+        from types import ModuleType
+        
+        minerl = ModuleType("minerl")
+        minerl_herobraine = ModuleType("minerl.herobraine")
+        minerl_herobraine_hero = ModuleType("minerl.herobraine.hero")
+        minerl_herobraine_hero_mc = ModuleType("minerl.herobraine.hero.mc")
+        
+        minerl_herobraine_hero_mc.MINERL_ITEM_MAP = {i: f"item_{i}" for i in range(256)}
+        
+        minerl.herobraine = minerl_herobraine
+        minerl_herobraine.hero = minerl_herobraine_hero
+        minerl_herobraine_hero.mc = minerl_herobraine_hero_mc
+        
+        sys.modules["minerl"] = minerl
+        sys.modules["minerl.herobraine"] = minerl_herobraine
+        sys.modules["minerl.herobraine.hero"] = minerl_herobraine_hero
+        sys.modules["minerl.herobraine.hero.mc"] = minerl_herobraine_hero_mc
+        
+        print("  ✓ Installed inline minerl mock")
+        return True
+    except Exception as e:
+        print(f"  ⚠️  Could not install minerl mock: {e}")
+        return False
+
+_install_minerl_mock()
 
 # Add VPT to path for imports
 # VPT_PATH can be overridden via environment variable

@@ -18,6 +18,9 @@ from collections import defaultdict
 from pprint import pprint
 import uuid
 
+# Configure PyTorch CUDA memory allocator to reduce fragmentation
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -302,6 +305,7 @@ class OasisGRPOTrainer:
         """
         Generate video rollouts using Oasis world model.
         Repeats inputs by group_size to form GRPO groups.
+        Memory-optimized version: processes in chunks and cleans up aggressively.
         """
         self.policy.eval_mode()
         
@@ -325,7 +329,16 @@ class OasisGRPOTrainer:
             
             # Compute log probabilities
             all_frames = torch.cat([initial_frames_repeated, generated_frames], dim=1)
+            
+            # Delete intermediate tensors
+            del generated_frames
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             latents = self.policy.encode_frames(all_frames)
+            
+            # Delete initial_frames_repeated to free memory
+            del initial_frames_repeated
             
             log_probs = []
             T_prompt = initial_frames.shape[1]
@@ -337,13 +350,21 @@ class OasisGRPOTrainer:
                 action = actions_repeated[:, action_idx:action_idx+1]
                 
                 log_prob = self.policy.compute_log_prob(context, action, target)
-                log_probs.append(log_prob)
+                log_probs.append(log_prob.detach())  # Detach to save memory
+                
+                # Clean up context and target
+                del context, target, action
             
             log_probs = torch.stack(log_probs, dim=1)
             
             # Compute reference log probs for KL if needed
             ref_log_probs = None
             if self.ref_policy is not None:
+                # Delete latents before computing ref_latents
+                del latents
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
                 ref_latents = self.ref_policy.encode_frames(all_frames)
                 ref_log_probs_list = []
                 
@@ -354,16 +375,21 @@ class OasisGRPOTrainer:
                     action = actions_repeated[:, action_idx:action_idx+1]
                     
                     ref_log_prob = self.ref_policy.compute_log_prob(context, action, target)
-                    ref_log_probs_list.append(ref_log_prob)
+                    ref_log_probs_list.append(ref_log_prob.detach())
+                    
+                    del context, target, action
                 
                 ref_log_probs = torch.stack(ref_log_probs_list, dim=1)
+                del ref_latents, ref_log_probs_list
+            else:
+                del latents
         
         # Create group indices
         # [0, 0, 0, 0, 1, 1, 1, 1, ...]
         indices = torch.arange(B, device=self.device).repeat_interleave(G)
         
         return {
-            'generated_frames': generated_frames,
+            'generated_frames': None,  # Don't keep generated_frames in memory
             'all_frames': all_frames,
             'log_probs': log_probs,
             'ref_log_probs': ref_log_probs,
@@ -383,6 +409,8 @@ class OasisGRPOTrainer:
                 actions,
                 return_per_frame=True,
             )
+            # Detach rewards to prevent gradient tracking
+            rewards = rewards.detach()
         return rewards, info
     
     def _compute_advantages(
@@ -541,11 +569,13 @@ class OasisGRPOTrainer:
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """Execute a single training step."""
         import time
+        import gc
         
         # Aggressive memory cleanup
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+        gc.collect()
         
         # Prepare inputs
         if 'initial_frame' in batch:
@@ -553,6 +583,7 @@ class OasisGRPOTrainer:
         else:
             frames = batch['frames'].to(self.device)
             initial_frames = frames[:, :self.config.n_prompt_frames]
+            del frames  # Free memory immediately
         
         actions = batch['actions'].to(self.device)
         target_actions = actions[:, :self.config.max_gen_frames]
@@ -561,6 +592,11 @@ class OasisGRPOTrainer:
         gen_start = time.perf_counter()
         rollout_data = self._generate_rollouts(initial_frames, target_actions)
         gen_time = time.perf_counter() - gen_start
+        
+        # Delete initial_frames after rollout generation
+        del initial_frames, target_actions
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         # 2. Compute rewards
         reward_start = time.perf_counter()
@@ -578,6 +614,13 @@ class OasisGRPOTrainer:
         )
         adv_time = time.perf_counter() - adv_start
         
+        # Save reward statistics before deleting
+        reward_mean = rewards.mean().item()
+        reward_std = rewards.std().item()
+        
+        # Delete rewards after computing advantages
+        del rewards
+        
         # 4. Update policy
         grpo_start = time.perf_counter()
         update_metrics = self._grpo_update(
@@ -588,10 +631,16 @@ class OasisGRPOTrainer:
         )
         grpo_time = time.perf_counter() - grpo_start
         
+        # Clean up rollout data
+        del rollout_data, advantages
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        
         # Metrics
         metrics = {
-            'reward/mean': rewards.mean().item(),
-            'reward/std': rewards.std().item(),
+            'reward/mean': reward_mean,
+            'reward/std': reward_std,
             **{f'reward/{k}': v for k, v in reward_info.items() if not k.startswith('time_')},
             **{f'advantage/{k}': v for k, v in adv_info.items()},
             **{f'train/{k}': v for k, v in update_metrics.items()},

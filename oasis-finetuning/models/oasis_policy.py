@@ -327,41 +327,51 @@ class OasisPolicy(nn.Module):
         # Use provided noise or generate new random noise
         # CRITICAL: For PPO/GRPO, noise MUST be consistent between rollout and update!
         if noise is not None:
-            # Ensure noise is on correct device
+            # Ensure noise is on correct device and use float32 for precision
             if noise.device != self.device:
                 noise = noise.to(self.device)
+            noise = noise.float()  # Use float32 for precision
         else:
-            noise = torch.randn_like(target_latents)
-            
-        alpha = self.alphas_cumprod[timesteps].view(B, 1, 1, 1, 1)
+            noise = torch.randn_like(target_latents, dtype=torch.float32)
         
-        noisy_target = alpha.sqrt() * target_latents + (1 - alpha).sqrt() * noise
+        # Use float32 for all critical computations to maintain precision
+        target_latents_f32 = target_latents.float()
+        alpha = self.alphas_cumprod[timesteps].view(B, 1, 1, 1, 1).float()
         
-        # Concatenate context and noisy target
-        x = torch.cat([latents, noisy_target], dim=1)
+        # Compute noisy target with full precision
+        alpha_sqrt = alpha.sqrt()
+        one_minus_alpha_sqrt = (1 - alpha).sqrt()
+        noisy_target = alpha_sqrt * target_latents_f32 + one_minus_alpha_sqrt * noise
+        
+        # Concatenate context and noisy target (convert context to float32 if needed)
+        latents_f32 = latents.float()
+        x = torch.cat([latents_f32, noisy_target], dim=1)
         
         # Create timestep tensor
         T = latents.shape[1]
         t_ctx = torch.full((B, T), 0, dtype=torch.long, device=self.device)
         t = torch.cat([t_ctx, timesteps.unsqueeze(1)], dim=1)
         
-        # Forward pass
+        # Forward pass - use autocast but ensure output is converted to float32
         with autocast(self.device, dtype=self.dtype):
             v_pred = self.dit(x, t, actions)
         
-        # Compute target velocity (ensure same dtype as v_pred)
-        v_target = alpha.sqrt() * noise - (1 - alpha).sqrt() * target_latents
-        v_target = v_target.to(v_pred.dtype)
+        # Convert to float32 for precision in loss computation
+        v_pred_f32 = v_pred[:, -1:].float()
+        
+        # Compute target velocity with full float32 precision
+        v_target = alpha_sqrt * noise - one_minus_alpha_sqrt * target_latents_f32
         
         # MSE loss as negative log probability proxy
-        # Use float32 for stable loss computation
-        mse = F.mse_loss(v_pred[:, -1:].float(), v_target.float(), reduction='none')
+        # Use float32 for stable and precise loss computation
+        mse = F.mse_loss(v_pred_f32, v_target, reduction='none')
         mse = mse.view(B, -1).mean(dim=-1)
         
         # Normalize MSE to a reasonable log probability range
         # This prevents extreme values that cause exp() overflow
         # Scale factor chosen empirically to keep log_probs in [-10, 0] range
-        log_probs = -mse * 0.1  # Scale down to prevent overflow
+        # Use float32 precision throughout
+        log_probs = (-mse * 0.1).float()  # Ensure float32 precision
         
         # Clamp to prevent extreme values
         # Widened range to [-100, 0] to avoid zero gradients for poor models

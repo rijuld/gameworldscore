@@ -10,8 +10,9 @@ for diffusion model finetuning.
 
 import os
 import sys
+import time
 from pathlib import Path
-from typing import Dict, Optional, Any, Callable, Tuple
+from typing import Dict, Optional, Any, Callable, Tuple, List
 from dataclasses import dataclass, field
 from collections import defaultdict
 from pprint import pprint
@@ -33,6 +34,7 @@ try:
     from verl.utils.torch_functional import masked_mean
     RLVR_AVAILABLE = True
 except ImportError:
+    print("Warning: RLVR-World not found. GRPO will not work correctly.")
     RLVR_AVAILABLE = False
     DataProto = None
 
@@ -64,24 +66,22 @@ class OasisGRPOConfig:
     # Training settings
     total_epochs: int = 10
     total_training_steps: int = 10000
-    train_batch_size: int = 4  # GRPO needs batch > 1 for normalization, 4 recommended
-    grpo_mini_batch_size: int = 4
-    grpo_epochs: int = 4  # Increased for sample efficiency
+    train_batch_size: int = 1  # Number of unique prompts per step
+    group_size: int = 4  # Number of rollouts per prompt (GRPO group size)
+    grpo_epochs: int = 4  # Number of update epochs per step
     
     # Rollout settings
     n_prompt_frames: int = 1
-    max_gen_frames: int = 4  # Reduced to prevent OOM
-    n_rollouts: int = 1
+    max_gen_frames: int = 4
     
     # GRPO hyperparameters (following RLVR-World)
-    learning_rate: float = 5e-7  # Conservative for GRPO stability
+    learning_rate: float = 5e-7
     gamma: float = 0.99
     lam: float = 0.95
-    clip_ratio: float = 0.2  # Standard clip ratio
-    log_ratio_clip: float = 2.0  # Clamp log(ratio) to prevent exp() overflow
-    entropy_coeff: float = 0.001  # Small entropy bonus
-    grad_clip: float = 1.0  # Gradient clipping
-    reward_scale: float = 1.0  # Scale rewards for stable training
+    clip_ratio: float = 0.2
+    entropy_coeff: float = 0.001
+    grad_clip: float = 1.0
+    reward_scale: float = 1.0
     
     # KL settings
     use_kl_in_reward: bool = False
@@ -89,13 +89,13 @@ class OasisGRPOConfig:
     kl_target: float = 0.1
     
     # Reward weights (GameWorldScore)
-    rik_weight: float = 1.0  # Requires VPT IDM (python download_vpt_idm.py)
+    rik_weight: float = 1.0
     rtc_weight: float = 1.0
     raq_weight: float = 1.0
-    require_vpt: bool = True  # Set to False to use SimpleIDM fallback
+    require_vpt: bool = True
     
-    # Advantage estimation - GRPO is recommended (following RLVR-World)
-    adv_estimator: str = "grpo"  # "grpo" (recommended), "reinforce_plus_plus", "gae"
+    # Advantage estimation
+    adv_estimator: str = "grpo"  # "grpo" (recommended)
     
     # Checkpointing
     save_freq: int = 100
@@ -103,8 +103,8 @@ class OasisGRPOConfig:
     checkpoint_dir: str = "checkpoints/oasis_grpo"
     
     # Video saving
-    video_save_freq: int = 50  # Save sample videos every N steps
-    video_save_dir: str = "samples"  # Directory to save videos
+    video_save_freq: int = 50
+    video_save_dir: str = "samples"
     
     # Logging
     project_name: str = "oasis_rl_finetuning"
@@ -117,15 +117,7 @@ class OasisGRPOConfig:
 
 class OasisGRPOTrainer:
     """
-    GRPO Trainer for Oasis world model.
-    
-    This trainer:
-    1. Runs long-horizon rollouts using Oasis policy
-    2. Computes ground-truth-free rewards using GameWorldScore
-    3. Updates the policy using GRPO with KL regularization
-    
-    The training loop follows RLVR-World's structure while using
-    Oasis-specific components for world modeling.
+    GRPO Trainer for Oasis world model using RLVR-World's implementation.
     """
     
     def __init__(self, config: OasisGRPOConfig):
@@ -147,6 +139,9 @@ class OasisGRPOTrainer:
         self.logger = None
         if config.use_wandb:
             self._init_wandb()
+            
+        if not RLVR_AVAILABLE:
+            raise RuntimeError("RLVR-World libraries not found. Please install RLVR-World or check paths.")
     
     def _init_policy(self):
         """Initialize Oasis policy and reference model."""
@@ -186,17 +181,14 @@ class OasisGRPOTrainer:
     
     def _init_dataloader(self):
         """Initialize data loader."""
-        # Support both absolute and relative paths
         data_dir = Path(self.config.data_dir)
         if not data_dir.is_absolute():
-            # Try relative to project root
             project_root = Path(__file__).parent.parent.parent
             data_dir = project_root / self.config.data_dir
         
         if data_dir.exists():
             print(f"Loading dataset from: {data_dir}")
             
-            # Create dataloader based on dataset type
             clip_length = self.config.n_prompt_frames + self.config.max_gen_frames
             
             self.train_dataloader = create_minecraft_dataloader(
@@ -207,25 +199,9 @@ class OasisGRPOTrainer:
                 frame_size=self.config.frame_size,
                 split="train",
             )
-            
-            # Try to create test dataloader
-            try:
-                self.test_dataloader = create_minecraft_dataloader(
-                    data_dir=str(data_dir),
-                    batch_size=self.config.train_batch_size,
-                    clip_length=clip_length,
-                    dataset_type=self.config.dataset_type,
-                    frame_size=self.config.frame_size,
-                    split="test",
-                    shuffle=False,
-                )
-            except Exception:
-                self.test_dataloader = None
         else:
             print(f"Warning: Data directory {data_dir} not found.")
-            print("Please set --data-dir to your dataset path.")
             self.train_dataloader = None
-            self.test_dataloader = None
     
     def _init_optimizer(self):
         """Initialize optimizer."""
@@ -235,11 +211,9 @@ class OasisGRPOTrainer:
             weight_decay=0.01,
         )
         
-        # Gradient scaler for mixed precision training
         if self.device == "cuda":
             self.grad_scaler = torch.cuda.amp.GradScaler()
         
-        # Learning rate scheduler
         if self.config.total_training_steps > 0:
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer,
@@ -251,15 +225,11 @@ class OasisGRPOTrainer:
     
     def _init_kl_controller(self):
         """Initialize adaptive KL controller."""
-        if RLVR_AVAILABLE:
-            self.kl_controller = core_algos.AdaptiveKLController(
-                init_kl_coef=self.config.kl_coeff,
-                target_kl=self.config.kl_target,
-                horizon=1000,
-            )
-        else:
-            # Simple fixed KL coefficient
-            self.kl_controller = type('KLCtrl', (), {'value': self.config.kl_coeff})()
+        self.kl_controller = core_algos.AdaptiveKLController(
+            init_kl_coef=self.config.kl_coeff,
+            target_kl=self.config.kl_target,
+            horizon=1000,
+        )
     
     def _init_wandb(self):
         """Initialize Weights & Biases logging."""
@@ -282,39 +252,30 @@ class OasisGRPOTrainer:
     ) -> Dict[str, torch.Tensor]:
         """
         Generate video rollouts using Oasis world model.
-        
-        This is the core of ground-truth-free RL training:
-        - Input: ONLY the first frame(s) + action sequence
-        - Output: Oasis generates the ENTIRE subsequent video
-        - No ground-truth future frames are used
-        
-        Args:
-            initial_frames: (B, T_prompt, C, H, W) initial frame(s) - typically just 1 frame
-            actions: (B, num_gen, action_dim) action sequence for generation
-            
-        Returns:
-            Dict containing:
-                - generated_frames: (B, num_gen, C, H, W) frames generated by Oasis
-                - all_frames: (B, T_prompt + num_gen, C, H, W) initial + generated
-                - log_probs: (B, num_gen) log probabilities for GRPO
-                - ref_log_probs: (B, num_gen) reference log probs for KL (optional)
-                - actions: (B, num_gen, action_dim) the action sequence used
+        Repeats inputs by group_size to form GRPO groups.
         """
         self.policy.eval_mode()
         
         B = initial_frames.shape[0]
+        G = self.config.group_size
+        
+        # Repeat inputs for group generation
+        # (B, ...) -> (B*G, ...)
+        initial_frames_repeated = initial_frames.repeat_interleave(G, dim=0)
+        actions_repeated = actions.repeat_interleave(G, dim=0)
+        
         num_gen = min(actions.shape[1], self.config.max_gen_frames)
         
         with torch.no_grad():
             # Generate frames
             generated_frames = self.policy.generate_sequence(
-                initial_frames=initial_frames,
-                actions=actions[:, :num_gen],
+                initial_frames=initial_frames_repeated,
+                actions=actions_repeated[:, :num_gen],
                 num_frames=num_gen,
             )
             
             # Compute log probabilities
-            all_frames = torch.cat([initial_frames, generated_frames], dim=1)
+            all_frames = torch.cat([initial_frames_repeated, generated_frames], dim=1)
             latents = self.policy.encode_frames(all_frames)
             
             log_probs = []
@@ -324,9 +285,7 @@ class OasisGRPOTrainer:
                 context = latents[:, :t]
                 target = latents[:, t:t+1]
                 action_idx = t - T_prompt
-                action = actions[:, action_idx:action_idx+1] if action_idx < actions.shape[1] else torch.zeros(
-                    B, 1, actions.shape[-1], device=self.device
-                )
+                action = actions_repeated[:, action_idx:action_idx+1]
                 
                 log_prob = self.policy.compute_log_prob(context, action, target)
                 log_probs.append(log_prob)
@@ -334,31 +293,33 @@ class OasisGRPOTrainer:
             log_probs = torch.stack(log_probs, dim=1)
             
             # Compute reference log probs for KL if needed
+            ref_log_probs = None
             if self.ref_policy is not None:
                 ref_latents = self.ref_policy.encode_frames(all_frames)
-                ref_log_probs = []
+                ref_log_probs_list = []
                 
                 for t in range(T_prompt, T_prompt + num_gen):
                     context = ref_latents[:, :t]
                     target = ref_latents[:, t:t+1]
                     action_idx = t - T_prompt
-                    action = actions[:, action_idx:action_idx+1] if action_idx < actions.shape[1] else torch.zeros(
-                        B, 1, actions.shape[-1], device=self.device
-                    )
+                    action = actions_repeated[:, action_idx:action_idx+1]
                     
                     ref_log_prob = self.ref_policy.compute_log_prob(context, action, target)
-                    ref_log_probs.append(ref_log_prob)
+                    ref_log_probs_list.append(ref_log_prob)
                 
-                ref_log_probs = torch.stack(ref_log_probs, dim=1)
-            else:
-                ref_log_probs = None
+                ref_log_probs = torch.stack(ref_log_probs_list, dim=1)
+        
+        # Create group indices
+        # [0, 0, 0, 0, 1, 1, 1, 1, ...]
+        indices = torch.arange(B, device=self.device).repeat_interleave(G)
         
         return {
             'generated_frames': generated_frames,
             'all_frames': all_frames,
             'log_probs': log_probs,
             'ref_log_probs': ref_log_probs,
-            'actions': actions[:, :num_gen],
+            'actions': actions_repeated[:, :num_gen],
+            'indices': indices,
         }
     
     def _compute_rewards(
@@ -366,151 +327,49 @@ class OasisGRPOTrainer:
         all_frames: torch.Tensor,
         actions: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Compute GameWorldScore rewards for generated frames.
-        
-        Args:
-            all_frames: (B, T, C, H, W) all frames (prompt + generated)
-            actions: (B, num_gen, action_dim) actions
-            
-        Returns:
-            rewards: (B, num_gen) rewards for each generated frame
-        """
-        # Use GameWorldScore reward (no grad needed for reward computation)
+        """Compute GameWorldScore rewards."""
         with torch.no_grad():
             rewards, info = self.reward_fn.compute_sequence_reward(
                 all_frames,
                 actions,
                 return_per_frame=True,
             )
-        
         return rewards, info
     
     def _compute_advantages(
         self,
         rewards: torch.Tensor,
-        log_probs: torch.Tensor,
-        ref_log_probs: Optional[torch.Tensor],
+        indices: torch.Tensor,
         response_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        Compute advantages using the configured estimator.
-        
-        GRPO (Group Relative Policy Optimization) - following RLVR-World's implementation:
-        - Computes per-trajectory scores (sum of rewards)
-        - Normalizes within groups (or batch if single rollout)
-        - Simple mean/std whitening for stable gradients
-        
-        Reference: RLVR-World/vid_wm/verl/verl/trainer/ppo/core_algos.py
-        
-        Args:
-            rewards: (B, T) rewards
-            log_probs: (B, T) log probabilities
-            ref_log_probs: (B, T) reference log probs for KL
-            response_mask: (B, T) mask for valid positions
-            
-        Returns:
-            advantages: (B, T) computed advantages
-            info: Dict with advantage statistics
+        Compute advantages using verl's implementation.
         """
-        B, T = rewards.shape
-        info = {}
-        epsilon = 1e-6
-        
-        # Scale rewards for stability
+        # Scale rewards
         scaled_rewards = rewards * self.config.reward_scale
         
-        # Apply KL penalty if using KL in reward
-        if self.config.use_kl_in_reward and ref_log_probs is not None:
-            kl = log_probs - ref_log_probs
-            # Clamp KL to prevent extreme penalties
-            kl = torch.clamp(kl, -10.0, 10.0)
-            scaled_rewards = scaled_rewards - self.kl_controller.value * kl
-            info['kl_mean'] = kl.mean().item()
+        # Create response mask if not provided (all ones)
+        if response_mask is None:
+            response_mask = torch.ones_like(rewards)
+            
+        # Use verl's GRPO implementation
+        # Note: verl expects indices as numpy array or tensor? core_algos says numpy array or tensor depending on impl
+        # core_algos.compute_grpo_outcome_advantage uses id2score[index[i]], so index needs to be iterable/hashable
         
-        # Compute advantages based on estimator type
-        if self.config.adv_estimator == "grpo":
-            # GRPO: Group Relative Policy Optimization
-            # Following RLVR-World's compute_grpo_outcome_advantage
-            
-            # 1. Compute per-trajectory scores (sum of rewards)
-            scores = scaled_rewards.sum(dim=-1)  # (B,)
-            
-            # 2. Normalize within batch (since we have single rollouts per prompt)
-            # RLVR-World normalizes within groups sharing same prompt index
-            # With n_rollouts=1, we normalize across the entire batch
-            with torch.no_grad():
-                score_mean = scores.mean()
-                score_std = scores.std()
-                
-                # Handle edge case of batch_size=1 or zero std
-                if B == 1 or score_std < epsilon:
-                    # No normalization possible with single sample
-                    normalized_scores = scores - score_mean
-                else:
-                    normalized_scores = (scores - score_mean) / (score_std + epsilon)
-            
-            # 3. Expand to per-timestep advantages
-            # Multiply by response_mask if provided
-            if response_mask is not None:
-                advantages = normalized_scores.unsqueeze(-1) * response_mask.float()
-            else:
-                advantages = normalized_scores.unsqueeze(-1).expand(-1, T)
-            
-            info['grpo_score_mean'] = score_mean.item()
-            info['grpo_score_std'] = score_std.item() if score_std > epsilon else 0.0
-            info['grpo_normalized_mean'] = normalized_scores.mean().item()
-            
-        elif self.config.adv_estimator == "reinforce_plus_plus":
-            # REINFORCE++: Discounted returns with whitening
-            # Following RLVR-World's compute_reinforce_plus_plus_outcome_advantage
-            returns = torch.zeros_like(scaled_rewards)
-            running_return = torch.zeros(B, device=scaled_rewards.device)
-            
-            for t in reversed(range(T)):
-                running_return = scaled_rewards[:, t] + self.config.gamma * running_return
-                returns[:, t] = running_return
-            
-            # Whiten returns (masked whitening like RLVR-World)
-            if response_mask is not None:
-                mask = response_mask.float()
-                masked_returns = returns * mask
-                valid_count = mask.sum() + epsilon
-                mean_return = masked_returns.sum() / valid_count
-                var_return = ((masked_returns - mean_return * mask) ** 2 * mask).sum() / valid_count
-                std_return = torch.sqrt(var_return) + epsilon
-                advantages = (returns - mean_return) / std_return * mask
-            else:
-                mean_return = returns.mean()
-                std_return = returns.std() + epsilon
-                advantages = (returns - mean_return) / std_return
-            
-            info['return_mean'] = mean_return.item()
-            info['return_std'] = std_return.item() if isinstance(std_return, float) else std_return.item()
+        # Convert indices to numpy for verl
+        indices_np = indices.cpu().numpy()
         
-        else:  # GAE or default
-            # GAE without value function - just use discounted returns
-            returns = torch.zeros_like(scaled_rewards)
-            running_return = torch.zeros(B, device=scaled_rewards.device)
-            
-            for t in reversed(range(T)):
-                running_return = scaled_rewards[:, t] + self.config.gamma * running_return
-                returns[:, t] = running_return
-            
-            # Simple normalization
-            mean_return = returns.mean()
-            std_return = returns.std() + epsilon
-            advantages = (returns - mean_return) / std_return
-            
-            info['return_mean'] = mean_return.item()
+        advantages, _ = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=scaled_rewards,
+            response_mask=response_mask,
+            index=indices_np,
+        )
         
-        # Final safety clamp to prevent extreme values
-        advantages = torch.clamp(advantages, -5.0, 5.0)
-        
-        info['advantage_mean'] = advantages.mean().item()
-        info['advantage_std'] = advantages.std().item()
-        info['advantage_max'] = advantages.max().item()
-        info['advantage_min'] = advantages.min().item()
+        info = {
+            'advantage_mean': advantages.mean().item(),
+            'advantage_std': advantages.std().item(),
+            'reward_mean': rewards.mean().item(),
+        }
         
         return advantages, info
     
@@ -523,23 +382,7 @@ class OasisGRPOTrainer:
         response_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, float]:
         """
-        Perform GRPO policy update with stability improvements.
-        
-        Key stability features:
-        1. Log-ratio clamping before exp() to prevent overflow
-        2. Gradient accumulation with NaN checking
-        3. Per-epoch learning rate warmup
-        4. Proper entropy computation
-        
-        Args:
-            all_frames: (B, T, C, H, W) all frames
-            actions: (B, T-1, action_dim) actions
-            old_log_probs: (B, T-1) log probs from rollout
-            advantages: (B, T-1) computed advantages
-            response_mask: (B, T-1) mask for valid positions
-            
-        Returns:
-            Dict with training metrics
+        Perform GRPO policy update using verl's core_algos.
         """
         self.policy.train_mode()
         
@@ -550,12 +393,11 @@ class OasisGRPOTrainer:
         metrics = defaultdict(list)
         successful_updates = 0
         
-        # Ensure tensors are float32 for stable training
-        old_log_probs = old_log_probs.float().detach()
-        advantages = advantages.float().detach()
-        
-        # Detach advantages to prevent gradient flow
+        old_log_probs = old_log_probs.detach()
         advantages = advantages.detach()
+        
+        if response_mask is None:
+            response_mask = torch.ones_like(old_log_probs)
         
         for epoch in range(self.config.grpo_epochs):
             # Compute current log probs
@@ -566,436 +408,171 @@ class OasisGRPOTrainer:
                 context = latents[:, :t]
                 target = latents[:, t:t+1]
                 action_idx = t - T_prompt
-                
-                if action_idx < actions.shape[1]:
-                    action = actions[:, action_idx:action_idx+1]
-                else:
-                    action = torch.zeros(B, 1, actions.shape[-1], device=self.device)
+                action = actions[:, action_idx:action_idx+1]
                 
                 log_prob = self.policy.compute_log_prob(context, action, target)
-                log_probs.append(log_prob.float())
+                log_probs.append(log_prob)
             
             log_probs = torch.stack(log_probs, dim=1)
             
-            # Ensure shape compatibility
-            min_len = min(log_probs.shape[1], old_log_probs.shape[1], advantages.shape[1])
-            log_probs_batch = log_probs[:, :min_len]
-            old_log_probs_batch = old_log_probs[:, :min_len]
-            advantages_batch = advantages[:, :min_len]
-            
-            # ============================================================
-            # CRITICAL STABILITY FIX: Clamp log-ratio BEFORE exp()
-            # ============================================================
-            log_ratio = log_probs_batch - old_log_probs_batch
-            
-            # Clamp log ratio to prevent exp() overflow
-            # log_ratio in [-2, 2] means ratio in [0.135, 7.389]
-            log_ratio_clamped = torch.clamp(
-                log_ratio, 
-                -self.config.log_ratio_clip, 
-                self.config.log_ratio_clip
+            # Use verl's compute_policy_loss
+            pg_loss, pg_clipfrac, ppo_kl, _ = core_algos.compute_policy_loss(
+                old_log_prob=old_log_probs,
+                log_prob=log_probs,
+                advantages=advantages,
+                response_mask=response_mask,
+                cliprange=self.config.clip_ratio,
+                loss_agg_mode="token-mean"
             )
-            ratio = torch.exp(log_ratio_clamped)
             
-            # Check for any remaining NaN/Inf in ratio
-            if not torch.isfinite(ratio).all():
-                print(f"  ⚠️  Epoch {epoch}: ratio contains NaN/Inf, skipping")
-                metrics['pg_loss'].append(float('nan'))
-                metrics['ratio_mean'].append(float('nan'))
-                continue
-            
-            # GRPO/PPO clipped objective
-            pg_loss1 = -advantages_batch * ratio
-            pg_loss2 = -advantages_batch * torch.clamp(
-                ratio,
-                1 - self.config.clip_ratio,
-                1 + self.config.clip_ratio,
-            )
-            pg_loss = torch.max(pg_loss1, pg_loss2)
-            
-            # Entropy bonus - use log prob variance as proxy
-            # Lower (more negative) log probs = more uncertainty = higher entropy
-            log_prob_mean = log_probs_batch.mean()
-            log_prob_var = log_probs_batch.var()
-            entropy_proxy = -log_prob_mean  # Higher is more exploratory
+            # Entropy loss
+            # verl's compute_entropy_loss requires logits, but we have log_probs
+            # We can approximate entropy from log_probs: -sum(p * log(p))
+            # But we only have log_prob of the sampled action.
+            # Simple proxy: -mean(log_prob)
+            entropy_proxy = -log_probs.mean()
             entropy_loss = -self.config.entropy_coeff * entropy_proxy
             
-            # Apply mask if available
-            if response_mask is not None:
-                mask = response_mask[:, :min_len].float()
-                pg_loss = (pg_loss * mask).sum() / (mask.sum() + 1e-8)
-            else:
-                pg_loss = pg_loss.mean()
-            
-            # Total loss
             total_loss = pg_loss + entropy_loss
             
-            # ============================================================
-            # STABILITY CHECK: Skip if loss is bad
-            # ============================================================
-            if not torch.isfinite(total_loss):
-                print(f"  ⚠️  Epoch {epoch}: loss is {total_loss.item():.4f}, skipping")
-                metrics['pg_loss'].append(float('nan'))
-                metrics['total_loss'].append(float('nan'))
-                continue
-            
-            # Backward pass
+            # Optimization step
             self.optimizer.zero_grad()
             
             if hasattr(self, 'grad_scaler'):
                 self.grad_scaler.scale(total_loss).backward()
                 self.grad_scaler.unscale_(self.optimizer)
-                
-                # Compute grad norm before clipping
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.get_trainable_parameters(),
                     self.config.grad_clip,
                 )
-                
-                # Skip if gradients are bad
-                if not torch.isfinite(grad_norm):
-                    print(f"  ⚠️  Epoch {epoch}: grad_norm is {grad_norm.item():.4f}, skipping")
-                    self.grad_scaler.update()
-                    self.optimizer.zero_grad()
-                    metrics['grad_norm'].append(float('nan'))
-                    continue
-                
                 self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
             else:
                 total_loss.backward()
-                
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.get_trainable_parameters(),
                     self.config.grad_clip,
                 )
-                
-                if isinstance(grad_norm, torch.Tensor) and not torch.isfinite(grad_norm):
-                    print(f"  ⚠️  Epoch {epoch}: grad_norm is {grad_norm.item():.4f}, skipping")
-                    self.optimizer.zero_grad()
-                    metrics['grad_norm'].append(float('nan'))
-                    continue
-                
                 self.optimizer.step()
             
             successful_updates += 1
             
-            # Update scheduler (only on successful updates)
             if self.scheduler is not None:
                 self.scheduler.step()
             
-            # Record metrics
             metrics['pg_loss'].append(pg_loss.item())
-            metrics['entropy_proxy'].append(entropy_proxy.item())
-            metrics['entropy_loss'].append(entropy_loss.item())
             metrics['total_loss'].append(total_loss.item())
             metrics['grad_norm'].append(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
-            metrics['ratio_mean'].append(ratio.mean().item())
-            metrics['ratio_std'].append(ratio.std().item())
-            metrics['ratio_max'].append(ratio.max().item())
-            metrics['ratio_min'].append(ratio.min().item())
-            metrics['log_ratio_mean'].append(log_ratio.mean().item())
-            metrics['log_ratio_std'].append(log_ratio.std().item())
+            metrics['clip_fraction'].append(pg_clipfrac.item())
+            metrics['kl'].append(ppo_kl.item())
             
-            # Compute clip fraction
-            clip_frac = ((ratio - 1).abs() > self.config.clip_ratio).float().mean().item()
-            metrics['clip_fraction'].append(clip_frac)
-            
-            # Log ratio clamp fraction
-            clamp_frac = (log_ratio.abs() > self.config.log_ratio_clip).float().mean().item()
-            metrics['log_ratio_clamp_fraction'].append(clamp_frac)
-        
-        # Add successful update count
         result = {k: np.mean(v) if v else float('nan') for k, v in metrics.items()}
-        result['successful_updates'] = successful_updates
         result['update_success_rate'] = successful_updates / self.config.grpo_epochs
         
         return result
     
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        """
-        Execute a single training step.
-        
-        RL Training Flow (Ground-Truth Free):
-        1. INPUT: First frame + action sequence (from dataset)
-        2. GENERATE: Oasis generates entire video from first frame + actions
-        3. REWARD: GameWorldScore computed on GENERATED frames only
-        4. UPDATE: GRPO update based on rewards
-        
-        No ground-truth future frames are used!
-        
-        Args:
-            batch: Dict with 'initial_frame' (or 'frames') and 'actions'
-            
-        Returns:
-            Dict with training metrics
-        """
+        """Execute a single training step."""
         import time
         
-        # Clear GPU cache at start of each step to prevent OOM
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        # Handle both new format (initial_frame) and old format (frames)
+        # Prepare inputs
         if 'initial_frame' in batch:
-            # New format: only first frame provided
-            initial_frames = batch['initial_frame'].to(self.device)  # (B, 1, C, H, W)
+            initial_frames = batch['initial_frame'].to(self.device)
         else:
-            # Old format: extract first frame from sequence
             frames = batch['frames'].to(self.device)
-            initial_frames = frames[:, :self.config.n_prompt_frames]  # (B, 1, C, H, W)
+            initial_frames = frames[:, :self.config.n_prompt_frames]
         
         actions = batch['actions'].to(self.device)
-        
-        B = initial_frames.shape[0]
-        
-        # Action sequence for generation
         target_actions = actions[:, :self.config.max_gen_frames]
         
-        # ============================================================
-        # STEP 1: Generate entire video from first frame + actions
-        # ============================================================
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        # 1. Generate rollouts (with group repetition)
         gen_start = time.perf_counter()
-        
         rollout_data = self._generate_rollouts(initial_frames, target_actions)
-        
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
         gen_time = time.perf_counter() - gen_start
-        num_frames = rollout_data['generated_frames'].shape[1]
-        print(f"  ⏱ Video Generation: {gen_time:.2f}s ({num_frames} frames, {gen_time/num_frames:.3f}s/frame)")
         
-        # Clear cache after generation before reward computation
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        # ============================================================
-        # STEP 2: Compute rewards on GENERATED frames (ground-truth free)
-        # ============================================================
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        # 2. Compute rewards
         reward_start = time.perf_counter()
-        
         rewards, reward_info = self._compute_rewards(
             rollout_data['all_frames'],
             rollout_data['actions'],
         )
-        
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
         reward_time = time.perf_counter() - reward_start
         
-        # Clear cache after reward computation
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        # Print reward timing breakdown
-        rik_time = reward_info.get('time_rik_sec', 0)
-        rtc_time = reward_info.get('time_rtc_sec', 0)
-        raq_time = reward_info.get('time_raq_sec', 0)
-        print(f"  ⏱ Reward Computation: {reward_time:.2f}s total")
-        print(f"      RIK (Action Fidelity):     {rik_time:.2f}s")
-        print(f"      RTC (Temporal Consistency): {rtc_time:.2f}s")
-        print(f"      RAQ (Aesthetic Quality):   {raq_time:.2f}s")
-        
-        # ============================================================
-        # STEP 3: Compute advantages for GRPO
-        # ============================================================
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        # 3. Compute advantages (GRPO)
         adv_start = time.perf_counter()
-        
         advantages, adv_info = self._compute_advantages(
             rewards,
-            rollout_data['log_probs'],
-            rollout_data['ref_log_probs'],
+            rollout_data['indices'],
         )
-        
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
         adv_time = time.perf_counter() - adv_start
         
-        # ============================================================
-        # STEP 4: GRPO policy update
-        # ============================================================
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        # 4. Update policy
         grpo_start = time.perf_counter()
-        
         update_metrics = self._grpo_update(
             rollout_data['all_frames'],
             rollout_data['actions'],
             rollout_data['log_probs'],
             advantages,
         )
-        
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
         grpo_time = time.perf_counter() - grpo_start
-        print(f"  ⏱ GRPO Update: {grpo_time:.2f}s (advantages: {adv_time:.3f}s)")
         
-        # Aggregate metrics
+        # Metrics
         metrics = {
             'reward/mean': rewards.mean().item(),
             'reward/std': rewards.std().item(),
-            'reward/total': rewards.sum(dim=-1).mean().item(),
             **{f'reward/{k}': v for k, v in reward_info.items() if not k.startswith('time_')},
             **{f'advantage/{k}': v for k, v in adv_info.items()},
             **{f'train/{k}': v for k, v in update_metrics.items()},
             'train/learning_rate': self.optimizer.param_groups[0]['lr'],
-            'train/num_generated_frames': rollout_data['generated_frames'].shape[1],
-            'train/estimator': self.config.adv_estimator,
-            # Timing metrics
             'time/generation_sec': gen_time,
             'time/reward_total_sec': reward_time,
-            'time/advantage_sec': adv_time,
             'time/grpo_update_sec': grpo_time,
         }
         
-        # Update KL controller
-        if self.config.use_kl_in_reward and rollout_data['ref_log_probs'] is not None:
-            kl = (rollout_data['log_probs'] - rollout_data['ref_log_probs']).mean().item()
-            if hasattr(self.kl_controller, 'update'):
-                self.kl_controller.update(kl, B)
-            metrics['train/kl'] = kl
-            metrics['train/kl_coeff'] = self.kl_controller.value
+        print(f"  Step {self.global_step}: R={metrics['reward/mean']:.3f}, "
+              f"L={metrics['train/total_loss']:.4f}, "
+              f"Clip={metrics['train/clip_fraction']:.2f}")
         
         return metrics
     
     def fit(self):
-        """
-        Main training loop.
-        """
-        print(f"\n{'='*60}")
-        print(f"Starting Oasis GRPO Training")
-        print(f"{'='*60}")
-        print(f"  Advantage Estimator: {self.config.adv_estimator.upper()}")
-        print(f"  Total epochs: {self.config.total_epochs}")
-        print(f"  Total steps: {self.config.total_training_steps}")
-        print(f"  Batch size: {self.config.train_batch_size}")
-        print(f"  GRPO epochs per step: {self.config.grpo_epochs}")
-        print(f"  Learning rate: {self.config.learning_rate}")
-        print(f"{'─'*60}")
-        print(f"  GRPO Hyperparameters (RLVR-World style):")
-        print(f"    Clip ratio: {self.config.clip_ratio}")
-        print(f"    Log-ratio clip: {self.config.log_ratio_clip}")
-        print(f"    Gradient clip: {self.config.grad_clip}")
-        print(f"    Reward scale: {self.config.reward_scale}")
-        print(f"{'─'*60}")
-        print(f"  Reward Scales (all normalized to [0, 1]):")
-        print(f"    RIK (Action Fidelity):      w={self.config.rik_weight:.2f}  ideal→1.0")
-        print(f"    RTC (Temporal Consistency): w={self.config.rtc_weight:.2f}  ideal→1.0")
-        print(f"    RAQ (Aesthetic Quality):    w={self.config.raq_weight:.2f}  ideal→0.8")
-        print(f"  Expected total reward: 0.7-0.9 for good quality")
-        print(f"{'='*60}\n")
+        """Main training loop."""
+        print(f"Starting Oasis GRPO Training (Group Size: {self.config.group_size})")
         
         if self.train_dataloader is None:
-            print("No training data available. Exiting.")
             return
         
         self.global_step = 0
         
         for epoch in range(self.config.total_epochs):
-            if self.global_step >= self.config.total_training_steps:
-                break
+            epoch_pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch + 1}")
             
-            # Epoch header
-            print(f"\n{'─'*60}")
-            print(f"Epoch {epoch + 1}/{self.config.total_epochs}")
-            print(f"{'─'*60}")
-            
-            epoch_metrics = defaultdict(list)
-            steps_in_epoch = len(self.train_dataloader)
-            
-            # Progress bar for this epoch
-            epoch_pbar = tqdm(
-                self.train_dataloader,
-                desc=f"Epoch {epoch + 1}",
-                total=steps_in_epoch,
-                leave=True,
-            )
-            
-            for batch_idx, batch in enumerate(epoch_pbar):
+            for batch in epoch_pbar:
                 if self.global_step >= self.config.total_training_steps:
                     break
                 
-                # Training step
                 metrics = self.train_step(batch)
                 
-                # Accumulate epoch metrics
-                for k, v in metrics.items():
-                    epoch_metrics[k].append(v)
-                
-                # Update progress bar with current metrics
-                epoch_pbar.set_postfix({
-                    'step': self.global_step,
-                    'loss': f"{metrics.get('train/total_loss', 0):.4f}",
-                    'grad': f"{metrics.get('train/grad_norm', 0):.2f}",
-                    'ratio': f"{metrics.get('train/ratio_mean', 1):.2f}",
-                    'clip': f"{metrics.get('train/clip_fraction', 0):.2f}",
-                    'R': f"{metrics.get('reward/mean', 0):.3f}",
-                    'A': f"{metrics.get('advantage/advantage_mean', 0):.2f}",
-                    'ok': f"{metrics.get('train/update_success_rate', 0):.0%}",
-                })
-                
-                # Logging to wandb
                 if self.logger is not None:
                     self.logger.log(metrics, step=self.global_step)
                 
-                # Checkpointing
-                if self.config.save_freq > 0 and self.global_step % self.config.save_freq == 0 and self.global_step > 0:
+                if self.config.save_freq > 0 and self.global_step % self.config.save_freq == 0:
                     self.save_checkpoint()
                 
-                # Save sample video
                 if self.config.video_save_freq > 0 and self.global_step % self.config.video_save_freq == 0:
                     self.save_sample_video(batch)
                 
                 self.global_step += 1
             
-            # Epoch summary
-            if epoch_metrics:
-                avg_reward = np.mean(epoch_metrics.get('reward/mean', [0]))
-                avg_loss = np.mean(epoch_metrics.get('train/pg_loss', [0]))
-                avg_rik = np.mean(epoch_metrics.get('reward/rik_reward', [0]))
-                avg_rtc = np.mean(epoch_metrics.get('reward/rtc_reward', [0]))
-                avg_raq = np.mean(epoch_metrics.get('reward/raq_reward', [0]))
-                
-                print(f"\n  Epoch {epoch + 1} Summary:")
-                print(f"    Steps completed: {len(epoch_metrics.get('reward/mean', []))}")
-                print(f"    Avg Reward: {avg_reward:.4f}")
-                print(f"    Avg Loss: {avg_loss:.4f}")
-                print(f"    Rewards - RIK: {avg_rik:.4f}, RTC: {avg_rtc:.4f}, RAQ: {avg_raq:.4f}")
-                
-                # Log epoch summary
-                if self.logger is not None:
-                    self.logger.log({
-                        'epoch': epoch + 1,
-                        'epoch/avg_reward': avg_reward,
-                        'epoch/avg_loss': avg_loss,
-                        'epoch/avg_rik': avg_rik,
-                        'epoch/avg_rtc': avg_rtc,
-                        'epoch/avg_raq': avg_raq,
-                    }, step=self.global_step)
-        
-        # Final checkpoint
-        self.save_checkpoint()
-        
-        print(f"\n{'='*60}")
-        print(f"Training Complete!")
-        print(f"  Total steps: {self.global_step}")
-        print(f"{'='*60}")
-    
-    def save_sample_video(
-        self,
-        batch: Dict[str, torch.Tensor],
-        suffix: str = "",
-    ) -> Optional[str]:
-        """
-        Save a sample generated video for visualization.
-        
-        Args:
-            batch: Training batch with initial_frame and actions
-            suffix: Optional suffix for filename
-            
-        Returns:
-            Path to saved video or None if failed
-        """
+            self.save_checkpoint()
+
+    def save_sample_video(self, batch, suffix=""):
+        """Save sample video."""
+        # Implementation similar to original, adapted for new structure
         try:
-            # Lazy import using direct path to avoid 'utils' package conflict
             import sys
             from pathlib import Path
             utils_path = Path(__file__).parent.parent / "utils"
@@ -1003,7 +580,6 @@ class OasisGRPOTrainer:
                 sys.path.insert(0, str(utils_path))
             from video_utils import frames_to_video
             
-            # Get initial frame and actions
             if 'initial_frame' in batch:
                 initial_frames = batch['initial_frame'].to(self.device)
             else:
@@ -1012,11 +588,10 @@ class OasisGRPOTrainer:
             
             actions = batch['actions'].to(self.device)
             
-            # Take only first sample from batch
+            # Take first sample
             initial_frames = initial_frames[:1]
             actions = actions[:1, :self.config.max_gen_frames]
             
-            # Generate video
             self.policy.eval_mode()
             with torch.no_grad():
                 generated_frames = self.policy.generate_sequence(
@@ -1025,108 +600,33 @@ class OasisGRPOTrainer:
                     num_frames=self.config.max_gen_frames,
                 )
             
-            # Combine initial and generated frames: (1, T, C, H, W)
             all_frames = torch.cat([initial_frames, generated_frames], dim=1)
-            
-            # Remove batch dimension: (T, C, H, W)
             video_frames = all_frames[0]
             
-            # Create output directory
             video_dir = os.path.join(self.config.video_save_dir, self.config.experiment_name)
             os.makedirs(video_dir, exist_ok=True)
             
-            # Save video
             filename = f"step_{self.global_step}{suffix}.mp4"
             video_path = os.path.join(video_dir, filename)
             
             frames_to_video(video_frames, video_path, fps=10)
             print(f"  Saved video: {video_path}")
             
-            # Log to wandb if available
-            if self.logger is not None:
-                try:
-                    import wandb
-                    # Convert to format wandb expects
-                    video_np = (video_frames.permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)
-                    self.logger.log({
-                        "video/generated": wandb.Video(video_np, fps=10, format="mp4")
-                    }, step=self.global_step)
-                except Exception:
-                    pass  # wandb video logging is optional
-            
-            return video_path
-            
         except Exception as e:
             print(f"  Warning: Failed to save video: {e}")
-            return None
-    
-    def save_checkpoint(self, path: Optional[str] = None):
-        """Save training checkpoint."""
+
+    def save_checkpoint(self, path=None):
         if path is None:
             path = os.path.join(self.config.checkpoint_dir, f"step_{self.global_step}")
-        
         os.makedirs(path, exist_ok=True)
-        
-        checkpoint = {
+        torch.save({
             'model_state_dict': self.policy.dit.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'global_step': self.global_step,
             'config': self.config.__dict__,
-        }
-        
-        if self.scheduler is not None:
-            checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
-        
-        torch.save(checkpoint, os.path.join(path, 'checkpoint.pt'))
+        }, os.path.join(path, 'checkpoint.pt'))
         print(f"Saved checkpoint to {path}")
-    
-    def load_checkpoint(self, path: str):
-        """Load training checkpoint."""
-        checkpoint_file = os.path.join(path, 'checkpoint.pt')
-        
-        if os.path.exists(checkpoint_file):
-            checkpoint = torch.load(checkpoint_file, weights_only=False)
-            self.policy.dit.load_state_dict(checkpoint['model_state_dict'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            self.global_step = checkpoint.get('global_step', 0)
-            
-            if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
-                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            
-            print(f"Loaded checkpoint from {path} at step {self.global_step}")
-        else:
-            print(f"No checkpoint found at {path}")
 
-
-def create_oasis_grpo_trainer(
-    oasis_ckpt: str,
-    vae_ckpt: str,
-    reward_models_dir: str = "models_for_rl_finetuning",
-    **kwargs,
-) -> OasisGRPOTrainer:
-    """
-    Create Oasis GRPO trainer.
-    
-    Args:
-        oasis_ckpt: Path to Oasis DiT checkpoint
-        vae_ckpt: Path to VAE checkpoint
-        reward_models_dir: Directory with reward model checkpoints
-        **kwargs: Additional config options
-        
-    Returns:
-        OasisGRPOTrainer instance
-    """
-    config = OasisGRPOConfig(
-        oasis_ckpt=oasis_ckpt,
-        vae_ckpt=vae_ckpt,
-        reward_models_dir=reward_models_dir,
-        **kwargs,
-    )
+def create_oasis_grpo_trainer(oasis_ckpt, vae_ckpt, reward_models_dir="models_for_rl_finetuning", **kwargs):
+    config = OasisGRPOConfig(oasis_ckpt=oasis_ckpt, vae_ckpt=vae_ckpt, reward_models_dir=reward_models_dir, **kwargs)
     return OasisGRPOTrainer(config)
-
-
-# Backwards compatibility aliases
-OasisPPOConfig = OasisGRPOConfig
-OasisPPOTrainer = OasisGRPOTrainer
-create_oasis_ppo_trainer = create_oasis_grpo_trainer
-

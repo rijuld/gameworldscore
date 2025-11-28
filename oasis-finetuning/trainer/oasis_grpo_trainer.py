@@ -290,7 +290,6 @@ class OasisGRPOTrainer:
             rtc_weight=self.config.rtc_weight,
             raq_weight=self.config.raq_weight,
             require_vpt=self.config.require_vpt,
-            use_motion_smoothness=self.config.use_motion_smoothness,
         )
         
         # Disable torch.compile for reward models due to potential compatibility issues

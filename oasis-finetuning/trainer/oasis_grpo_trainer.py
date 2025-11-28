@@ -939,17 +939,7 @@ class OasisGRPOTrainer:
             rewards = rewards.to(self.device)
         
 
-            reward_info['kl_coeff'] = beta
-            reward_info['kl_penalty_applied'] = True
-            
-            # Clean up
-            del old_log_probs, ref_log_probs, kld, response_mask
-        else:
-            reward_info['kl_penalty_applied'] = False
-            if self.config.use_kl_in_reward and not hasattr(self, 'kl_controller'):
-                reward_info['kl_penalty_warning'] = 'KL controller not initialized'
-            elif self.config.use_kl_in_reward and rollout_data.get('ref_log_probs') is None:
-                reward_info['kl_penalty_warning'] = 'ref_log_probs not available'
+
         
         # 3. Compute advantages (GRPO)
         adv_start = time.perf_counter()

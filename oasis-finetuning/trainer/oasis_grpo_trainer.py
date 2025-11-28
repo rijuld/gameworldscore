@@ -579,6 +579,8 @@ class OasisGRPOTrainer:
                     torch.cuda.empty_cache()
             else:
                 # Everything stays on GPU - fastest path
+                # All reward computations (RIK, RTC, RAQ) will keep tensors on GPU
+                # Only VPT IDM preprocessing converts to numpy at the last step
                 rewards, info = self.reward_fn.compute_sequence_reward(
                     all_frames,
                     actions,
@@ -790,9 +792,6 @@ class OasisGRPOTrainer:
                 self.optimizer.step()
             
             successful_updates += 1
-            
-            if self.scheduler is not None:
-                self.scheduler.step()
             
             # Average metrics over micro-batches
             metrics['pg_loss'].append(epoch_pg_loss / num_micro_batches)
@@ -1023,6 +1022,11 @@ class OasisGRPOTrainer:
               f"RIK={rik_val:.3f}, RTC={rtc_val:.3f}, RAQ={raq_val:.3f} | "
               f"loss={metrics['train/total_loss']:.4f}, grad={metrics['train/grad_norm']:.4f}",
               flush=True)
+        
+        # CRITICAL FIX: Step scheduler once per training step (not per epoch)
+        # This ensures the learning rate schedule progresses correctly
+        if self.scheduler is not None:
+            self.scheduler.step()
         
         return metrics
     

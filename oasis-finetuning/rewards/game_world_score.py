@@ -168,7 +168,7 @@ class GameWorldScoreReward(nn.Module):
         """
         Compute GameWorldScore reward for a sequence of frames.
         
-        OPTIMIZED: Uses batched operations instead of sequential loops.
+        OPTIMIZED: Uses batched operations, ensures all computations stay on GPU.
         
         Args:
             frames: (B, T, C, H, W) sequence of frames (first is context)
@@ -179,6 +179,12 @@ class GameWorldScoreReward(nn.Module):
             reward: (B,) or (B, T-1) total/per-frame rewards
             info: Dict with aggregated metrics (includes timing)
         """
+        # Ensure inputs are on GPU (reward models will handle device internally)
+        if frames.device.type != self.device:
+            frames = frames.to(self.device)
+        if actions.device.type != self.device:
+            actions = actions.to(self.device)
+        
         import time
         
         # Time RIK (batched) - removed unnecessary syncs for speed

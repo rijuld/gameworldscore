@@ -208,6 +208,8 @@ class TemporalConsistencyReward(nn.Module):
         """
         Compute RTC reward for a sequence of frames (OPTIMIZED: batched).
         
+        OPTIMIZED: Ensures all inputs stay on GPU throughout computation.
+        
         Args:
             frames: (B, T, C, H, W) sequence of frames
             
@@ -215,10 +217,14 @@ class TemporalConsistencyReward(nn.Module):
             rewards: (B, T-1) RTC reward for each transition
             info: Dict with aggregated metrics
         """
+        # Ensure inputs are on GPU
+        if frames.device.type != self.device:
+            frames = frames.to(self.device)
+        
         B, T = frames.shape[:2]
         
         if T < 2:
-            return torch.zeros(B, 0, device=frames.device), {'rtc_clip_similarity': 0.0}
+            return torch.zeros(B, 0, device=self.device), {'rtc_clip_similarity': 0.0}
         
         # Batch process all transitions at once
         # frames[:, :-1] -> (B, T-1, C, H, W) - all frame_t

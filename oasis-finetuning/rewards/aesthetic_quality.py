@@ -280,6 +280,8 @@ class AestheticQualityReward(nn.Module):
         """
         Compute RAQ reward for a sequence of frames (OPTIMIZED: batched).
         
+        OPTIMIZED: Ensures all inputs stay on GPU throughout computation.
+        
         Args:
             frames: (B, T, C, H, W) sequence of frames
             
@@ -287,6 +289,10 @@ class AestheticQualityReward(nn.Module):
             rewards: (B, T) RAQ reward for each frame
             info: Dict with aggregated metrics
         """
+        # Ensure inputs are on GPU
+        if frames.device.type != self.device:
+            frames = frames.to(self.device)
+        
         B, T = frames.shape[:2]
         
         # Reshape to (B*T, C, H, W) for batch processing

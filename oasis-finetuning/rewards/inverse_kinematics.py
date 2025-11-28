@@ -136,13 +136,17 @@ class VPTIDMWrapper(nn.Module):
     def _preprocess_frames(self, frames: torch.Tensor) -> np.ndarray:
         """Convert torch frames to numpy format expected by VPT.
         
-        OPTIMIZED: Uses torch interpolation for batch resizing instead of cv2 per-frame.
+        OPTIMIZED: Uses torch interpolation for batch resizing, keeps on GPU until last step.
         """
         # frames: (B, C, H, W) in [0, 1] -> (B, H, W, C) in [0, 255] uint8
-        # Use torch interpolation for faster batch resizing
+        # Use torch interpolation for faster batch resizing (all on GPU)
         import torch.nn.functional as F
         
-        # Resize using torch (much faster for batches)
+        # Ensure frames are on the correct device (GPU if available)
+        if frames.device.type != self.device:
+            frames = frames.to(self.device)
+        
+        # Resize using torch (much faster for batches, stays on GPU)
         frames_resized = F.interpolate(
             frames,
             size=(self.agent_resolution[1], self.agent_resolution[0]),
@@ -150,9 +154,11 @@ class VPTIDMWrapper(nn.Module):
             align_corners=False
         )
         
-        # Convert to numpy format
+        # Convert to numpy format (only at the very end, after all GPU ops)
         frames_resized = frames_resized.permute(0, 2, 3, 1)  # (B, H, W, C)
-        frames_resized = (frames_resized * 255).byte().cpu().numpy()
+        frames_resized = (frames_resized * 255).clamp(0, 255).byte()
+        # Only move to CPU and convert to numpy at the last step
+        frames_resized = frames_resized.cpu().numpy()
         
         return frames_resized
     
@@ -345,6 +351,8 @@ class InverseKinematicsReward(nn.Module):
         """
         Compute RIK reward for a batch of transitions.
         
+        OPTIMIZED: Ensures all inputs are on GPU before computation.
+        
         Args:
             frame_t: (B, C, H, W) frame at time t, values in [0, 1]
             frame_t1: (B, C, H, W) frame at time t+1, values in [0, 1]
@@ -354,6 +362,14 @@ class InverseKinematicsReward(nn.Module):
             reward: (B,) RIK reward in [0, 1]
             info: Dict with additional metrics
         """
+        # Ensure all inputs are on the correct device (GPU if available)
+        if frame_t.device.type != self.device:
+            frame_t = frame_t.to(self.device)
+        if frame_t1.device.type != self.device:
+            frame_t1 = frame_t1.to(self.device)
+        if intended_action.device.type != self.device:
+            intended_action = intended_action.to(self.device)
+        
         if self.use_vpt:
             return self._compute_vpt_reward(frame_t, frame_t1, intended_action)
         else:
@@ -365,37 +381,49 @@ class InverseKinematicsReward(nn.Module):
         frame_t1: torch.Tensor,
         intended_action: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict]:
-        """Compute reward using VPT IDM."""
+        """Compute reward using VPT IDM.
+        
+        OPTIMIZED: Minimizes CPU operations, keeps tensors on GPU where possible.
+        """
         B = frame_t.shape[0]
         
-        # Get VPT predictions
+        # Ensure inputs are on correct device before VPT processing
+        if frame_t.device.type != self.device:
+            frame_t = frame_t.to(self.device)
+        if frame_t1.device.type != self.device:
+            frame_t1 = frame_t1.to(self.device)
+        if intended_action.device.type != self.device:
+            intended_action = intended_action.to(self.device)
+        
+        # Get VPT predictions (this will convert to numpy internally)
         predictions = self.vpt_idm.predict_actions(frame_t, frame_t1)
         
-        # Convert intended action to comparable format
+        # Convert intended action to comparable format (all on GPU)
         if intended_action.dim() == 1:
             action_idx = intended_action
         else:
             action_idx = intended_action.argmax(dim=-1)
         
         # VPT predicts buttons (binary) and camera (continuous)
-        # For simplicity, we compare the dominant action
-        # This is a simplified comparison - could be made more sophisticated
+        # Convert numpy predictions to torch tensor on GPU immediately
+        buttons_pred_np = predictions.get('attack', np.zeros(B))
+        buttons_pred = torch.from_numpy(buttons_pred_np).to(self.device).float()
         
-        buttons_pred = predictions.get('attack', np.zeros(B))
+        # Vectorized reward computation on GPU (much faster than loop)
+        action_idx_float = action_idx.float()
+        is_attack = (action_idx_float == 0)
+        pred_attack = (buttons_pred > 0.5)
         
-        # Simple reward: 1 if any predicted button matches intended action category
-        # This is a simplified heuristic
-        reward = torch.zeros(B, device=self.device)
-        
-        # Basic matching logic (can be improved)
-        for i in range(B):
-            # Check if intended action is attack and VPT predicts attack
-            if action_idx[i].item() == 0 and buttons_pred[i] > 0.5:
-                reward[i] = 1.0
-            elif action_idx[i].item() != 0 and buttons_pred[i] < 0.5:
-                reward[i] = 0.5  # Partial match for non-attack
-            else:
-                reward[i] = 0.2  # Base reward
+        # Vectorized matching logic
+        reward = torch.where(
+            is_attack & pred_attack,
+            torch.tensor(1.0, device=self.device),
+            torch.where(
+                ~is_attack & ~pred_attack,
+                torch.tensor(0.5, device=self.device),
+                torch.tensor(0.2, device=self.device)
+            )
+        )
         
         info = {
             'rik_ce_loss': 0.0,  # Not applicable for VPT
@@ -463,6 +491,8 @@ class InverseKinematicsReward(nn.Module):
         
         Note: VPT IDM processes sequentially, but SimpleIDM can batch.
         
+        OPTIMIZED: Ensures all inputs stay on GPU throughout computation.
+        
         Args:
             frames: (B, T, C, H, W) sequence of frames
             actions: (B, T-1, action_dim) actions for each transition
@@ -471,10 +501,16 @@ class InverseKinematicsReward(nn.Module):
             rewards: (B, T-1) RIK reward for each transition
             info: Dict with aggregated metrics
         """
+        # Ensure inputs are on GPU
+        if frames.device.type != self.device:
+            frames = frames.to(self.device)
+        if actions.device.type != self.device:
+            actions = actions.to(self.device)
+        
         B, T = frames.shape[:2]
         
         if T < 2:
-            return torch.zeros(B, 0, device=frames.device), {
+            return torch.zeros(B, 0, device=self.device), {
                 'rik_ce_loss': 0.0,
                 'rik_accuracy': 0.0,
                 'rik_using_vpt': self.use_vpt,

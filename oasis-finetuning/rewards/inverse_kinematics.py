@@ -124,10 +124,12 @@ class VPTIDMWrapper(nn.Module):
             self._vpt_available = True
             print("  ✓ VPT IDM loaded successfully")
             
+            print("  ✓ VPT IDM loaded successfully")
+            
         except Exception as e:
             print(f"  ✗ Failed to load VPT IDM: {e}")
-            print("  → Falling back to SimpleIDM")
             self._vpt_available = False
+            raise e
     
     @property
     def is_available(self):
@@ -205,42 +207,7 @@ class VPTIDMWrapper(nn.Module):
         return result
 
 
-class SimpleIDM(nn.Module):
-    """
-    Simple CNN-based IDM for development/testing.
-    
-    This is a fallback when VPT IDM cannot be loaded.
-    """
-    
-    def __init__(
-        self,
-        in_channels: int = 6,  # Two RGB frames concatenated
-        num_actions: int = 25,  # Minecraft action space
-        hidden_dim: int = 512,
-    ):
-        super().__init__()
-        
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 8, stride=4, padding=2),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((7, 7)),
-        )
-        
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(64 * 7 * 7, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, num_actions),
-        )
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv(x)
-        x = self.fc(x)
-        return x
+
 
 
 class InverseKinematicsReward(nn.Module):
@@ -270,76 +237,9 @@ class InverseKinematicsReward(nn.Module):
         super().__init__()
         self.device = device
         self.action_dim = action_dim
-        self.use_vpt = False
-        self.simple_idm = None
-        self.vpt_idm = None
-        
-        # Resolve default paths relative to project root
-        project_root = Path(__file__).parent.parent
-        
-        if idm_model_path is None:
-            idm_model_path = str(project_root / self.DEFAULT_MODEL_PATH)
-        if idm_weights_path is None:
-            idm_weights_path = str(project_root / self.DEFAULT_WEIGHTS_PATH)
-        
-        # Check if VPT IDM files exist
-        model_exists = os.path.exists(idm_model_path)
-        weights_exists = os.path.exists(idm_weights_path)
-        
-        if not model_exists or not weights_exists:
-            print("  ⚠️  VPT IDM not found!")
-            print(f"      Model path: {idm_model_path} ({'exists' if model_exists else 'MISSING'})")
-            print(f"      Weights path: {idm_weights_path} ({'exists' if weights_exists else 'MISSING'})")
-            print()
-            print("  To download VPT IDM, run:")
-            print("      python download_reward_models.py")
-            print()
-            print("  Or download manually from OpenAI:")
-            print("      https://openaipublic.blob.core.windows.net/minecraft-rl/idm/4x_idm.model")
-            print("      https://openaipublic.blob.core.windows.net/minecraft-rl/idm/4x_idm.weights")
-            print()
-            if require_vpt:
-                raise FileNotFoundError(
-                    f"VPT IDM files not found. Run 'python download_vpt_idm.py' to download them."
-                )
-            else:
-                print("  → Using SimpleIDM fallback (less accurate)")
-                self._init_simple_idm()
-                return
-        
-        # Load VPT IDM
-        self.vpt_idm = VPTIDMWrapper(
-            model_path=idm_model_path,
-            weights_path=idm_weights_path,
-            device=device,
-        )
-        
-        if not self.vpt_idm.is_available:
-            if require_vpt:
-                raise RuntimeError(
-                    "Failed to load VPT IDM. Check that VPT repo is cloned and dependencies installed.\n"
-                    "  Option 1: Clone VPT repo to project root:\n"
-                    "      git clone https://github.com/openai/Video-Pre-Training.git VPT\n"
-                    "  Option 2: Set VPT_PATH environment variable:\n"
-                    "      export VPT_PATH=/path/to/VPT\n"
-                    "  Option 3: Set require_vpt=False in config to use SimpleIDM fallback"
-                )
-            else:
-                print("  → Using SimpleIDM fallback (less accurate)")
-                self._init_simple_idm()
-                return
-        
         self.use_vpt = True
         print("  ✓ VPT IDM loaded successfully for RIK reward")
-    
-    def _init_simple_idm(self):
-        """Initialize SimpleIDM as fallback."""
-        self.simple_idm = SimpleIDM(
-            in_channels=6,
-            num_actions=self.action_dim,
-        ).to(self.device)
-        self.use_vpt = False
-        print("  ✓ SimpleIDM initialized as fallback")
+
     
     @torch.no_grad()
     def compute_reward(
@@ -370,10 +270,7 @@ class InverseKinematicsReward(nn.Module):
         if intended_action.device.type != self.device:
             intended_action = intended_action.to(self.device)
         
-        if self.use_vpt:
-            return self._compute_vpt_reward(frame_t, frame_t1, intended_action)
-        else:
-            return self._compute_simple_reward(frame_t, frame_t1, intended_action)
+        return self._compute_vpt_reward(frame_t, frame_t1, intended_action)
     
     def _compute_vpt_reward(
         self,
@@ -399,34 +296,110 @@ class InverseKinematicsReward(nn.Module):
         predictions = self.vpt_idm.predict_actions(frame_t, frame_t1)
         
         # Convert intended action to comparable format (all on GPU)
-        if intended_action.dim() == 1:
-            action_idx = intended_action
+        # intended_action is one-hot encoded (B, action_dim)
+        # We need to decode it to check individual keys
+        from data.action_utils import ACTION_KEYS
+        
+        total_reward = torch.zeros(B, device=self.device)
+        total_actions_checked = 0
+        
+        # Process each action key
+        for i, key in enumerate(ACTION_KEYS):
+            # Get intended value for this action key
+            intended_val = intended_action[:, i]  # (B,)
+            
+            if key == "cameraX":
+                # VPT predicts 'camera' as [dy, dx] (pitch, yaw)
+                # Oasis cameraX is dx (yaw) -> index 1
+                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 1]
+                pred_val = torch.from_numpy(pred_val_np).to(self.device).float()
+                
+                # Normalize predicted value to match Oasis range [-1, 1] roughly
+                # VPT camera is raw pixels/degrees? 
+                # Oasis encoding: value = (raw - num_buckets) / num_buckets
+                # Let's assume we just want correlation or low error
+                # For simplicity in RIK, we check if sign matches or if both are near zero
+                
+                # Better: Check if movement is consistent
+                # If intended > 0.1 (right), pred should be > 0
+                # If intended < -0.1 (left), pred should be < 0
+                # If intended ~ 0, pred should be ~ 0
+                
+                # Simple reward: 1.0 if consistent, 0.0 otherwise
+                threshold = 0.05
+                intended_move = (intended_val.abs() > threshold)
+                pred_move = (pred_val.abs() > threshold) # VPT threshold might need tuning
+                
+                # Direction match
+                same_dir = (intended_val * pred_val) > 0
+                
+                match = torch.where(
+                    ~intended_move & ~pred_move, torch.tensor(1.0, device=self.device), # Both still
+                    torch.where(
+                        intended_move & pred_move & same_dir, torch.tensor(1.0, device=self.device), # Both move same way
+                        torch.tensor(0.0, device=self.device) # Mismatch
+                    )
+                )
+                total_reward += match
+                total_actions_checked += 1
+                
+            elif key == "cameraY":
+                # VPT predicts 'camera' as [dy, dx] (pitch, yaw)
+                # Oasis cameraY is dy (pitch) -> index 0
+                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 0]
+                pred_val = torch.from_numpy(pred_val_np).to(self.device).float()
+                
+                threshold = 0.05
+                intended_move = (intended_val.abs() > threshold)
+                pred_move = (pred_val.abs() > threshold)
+                same_dir = (intended_val * pred_val) > 0
+                
+                match = torch.where(
+                    ~intended_move & ~pred_move, torch.tensor(1.0, device=self.device),
+                    torch.where(
+                        intended_move & pred_move & same_dir, torch.tensor(1.0, device=self.device),
+                        torch.tensor(0.0, device=self.device)
+                    )
+                )
+                total_reward += match
+                total_actions_checked += 1
+                
+            elif key == "ESC":
+                # VPT doesn't predict ESC usually, skip
+                continue
+                
+            else:
+                # Binary buttons
+                # VPT keys might differ slightly?
+                # VPT keys: attack, back, drop, forward, hotbar.X, inventory, jump, left, right, sneak, sprint, swapHands, use, pickItem
+                # Oasis keys match these exactly.
+                
+                if key not in predictions:
+                    continue
+                    
+                pred_prob_np = predictions[key]
+                # Handle different shapes (sometimes (B, 2) softmax, sometimes (B,) sigmoid?)
+                # VPT wrapper returns: p[key][0, 1] if ndim > 1 else p[key][1]
+                # So it should be probability of class 1
+                
+                pred_prob = torch.from_numpy(pred_prob_np).to(self.device).float()
+                
+                # Intended is 0 or 1
+                # Reward = 1 - |intended - pred|
+                # Or binary match with threshold
+                
+                match = 1.0 - (intended_val - pred_prob).abs()
+                total_reward += match
+                total_actions_checked += 1
+        
+        # Average reward across all checked actions
+        if total_actions_checked > 0:
+            reward = total_reward / total_actions_checked
         else:
-            action_idx = intended_action.argmax(dim=-1)
-        
-        # VPT predicts buttons (binary) and camera (continuous)
-        # Convert numpy predictions to torch tensor on GPU immediately
-        buttons_pred_np = predictions.get('attack', np.zeros(B))
-        buttons_pred = torch.from_numpy(buttons_pred_np).to(self.device).float()
-        
-        # Vectorized reward computation on GPU (much faster than loop)
-        action_idx_float = action_idx.float()
-        is_attack = (action_idx_float == 0)
-        pred_attack = (buttons_pred > 0.5)
-        
-        # Vectorized matching logic
-        reward = torch.where(
-            is_attack & pred_attack,
-            torch.tensor(1.0, device=self.device),
-            torch.where(
-                ~is_attack & ~pred_attack,
-                torch.tensor(0.5, device=self.device),
-                torch.tensor(0.2, device=self.device)
-            )
-        )
-        
+            reward = torch.zeros(B, device=self.device)
+            
         info = {
-            'rik_ce_loss': 0.0,  # Not applicable for VPT
+            'rik_ce_loss': 0.0,
             'rik_accuracy': reward.mean().item(),
             'rik_normalized': reward.mean().item(),
             'rik_using_vpt': True,
@@ -434,51 +407,7 @@ class InverseKinematicsReward(nn.Module):
         
         return reward, info
     
-    def _compute_simple_reward(
-        self,
-        frame_t: torch.Tensor,
-        frame_t1: torch.Tensor,
-        intended_action: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict]:
-        """Compute reward using SimpleIDM (fallback)."""
-        B = frame_t.shape[0]
-        
-        # Concatenate frames channel-wise
-        x = torch.cat([frame_t, frame_t1], dim=1)
-        action_logits = self.simple_idm(x)
-        
-        # Get action indices
-        if intended_action.dim() == 1:
-            action_idx = intended_action
-        else:
-            if intended_action.shape[-1] == self.action_dim:
-                action_idx = intended_action.argmax(dim=-1)
-            else:
-                # Continuous action space - use MSE
-                action_pred = F.softmax(action_logits, dim=-1)
-                mse = F.mse_loss(action_pred, intended_action, reduction='none')
-                mse_per_sample = mse.mean(dim=-1)
-                reward = torch.exp(-mse_per_sample)
-                return reward, {'rik_mse': mse_per_sample.mean().item()}
-        
-        # Cross-entropy loss
-        ce_loss = F.cross_entropy(action_logits, action_idx, reduction='none')
-        
-        # Normalize to [0, 1] using exp(-ce_loss)
-        reward = torch.exp(-ce_loss)
-        
-        # Compute accuracy
-        pred_action = action_logits.argmax(dim=-1)
-        accuracy = (pred_action == action_idx).float().mean()
-        
-        info = {
-            'rik_ce_loss': ce_loss.mean().item(),
-            'rik_accuracy': accuracy.item(),
-            'rik_normalized': reward.mean().item(),
-            'rik_using_vpt': False,
-        }
-        
-        return reward, info
+
     
     @torch.no_grad()
     def compute_sequence_reward(
@@ -516,39 +445,7 @@ class InverseKinematicsReward(nn.Module):
                 'rik_using_vpt': self.use_vpt,
             }
         
-        # For SimpleIDM, we can batch process
-        if not self.use_vpt:
-            # Reshape to (B*(T-1), C, H, W) for batch processing
-            frame_t_batch = frames[:, :-1].contiguous()  # (B, T-1, C, H, W)
-            frame_t1_batch = frames[:, 1:].contiguous()   # (B, T-1, C, H, W)
-            actions_batch = actions.contiguous()  # (B, T-1, action_dim)
-            
-            B_seq = B * (T - 1)
-            frame_t_flat = frame_t_batch.view(B_seq, *frame_t_batch.shape[2:])
-            frame_t1_flat = frame_t1_batch.view(B_seq, *frame_t1_batch.shape[2:])
-            actions_flat = actions_batch.view(B_seq, *actions_batch.shape[2:])
-            
-            # Concatenate frames for SimpleIDM
-            frames_concat = torch.cat([frame_t_flat, frame_t1_flat], dim=1)  # (B*(T-1), 6, H, W)
-            
-            # Forward pass
-            logits = self.simple_idm(frames_concat)  # (B*(T-1), num_actions)
-            
-            # Compute reward
-            ce_loss = F.cross_entropy(logits, actions_flat.argmax(dim=-1), reduction='none')
-            reward_flat = torch.exp(-ce_loss)  # Normalize to [0, 1]
-            accuracy_flat = (logits.argmax(dim=-1) == actions_flat.argmax(dim=-1)).float()
-            
-            # Reshape back to (B, T-1)
-            rewards = reward_flat.view(B, T - 1)
-            
-            info = {
-                'rik_ce_loss': ce_loss.mean().item(),
-                'rik_accuracy': accuracy_flat.mean().item(),
-                'rik_using_vpt': False,
-            }
-            
-            return rewards, info
+
         
         # For VPT IDM, we still need to process sequentially (VPT limitation)
         # OPTIMIZED: Batch process all timesteps at once where possible

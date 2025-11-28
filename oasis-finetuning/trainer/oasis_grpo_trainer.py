@@ -1130,6 +1130,36 @@ class OasisGRPOTrainer:
             frames_to_video(video_frames, video_path, fps=10)
             print(f"  Saved video: {video_path}")
             
+            # Save reference policy video if available
+            if self.ref_policy is not None:
+                # Prepare inputs for reference policy
+                if self.ref_policy_device == "cpu":
+                    ref_initial_frames = initial_frames.cpu()
+                    ref_actions = actions.cpu()
+                else:
+                    ref_initial_frames = initial_frames
+                    ref_actions = actions
+                
+                with torch.no_grad():
+                    ref_generated_frames = self.ref_policy.generate_sequence(
+                        initial_frames=ref_initial_frames,
+                        actions=ref_actions,
+                        num_frames=self.config.max_gen_frames,
+                    )
+                
+                # Move back to CPU/GPU for saving (frames_to_video expects CPU usually, but let's keep consistent)
+                if ref_generated_frames.device != initial_frames.device:
+                    ref_generated_frames = ref_generated_frames.to(initial_frames.device)
+                
+                ref_all_frames = torch.cat([initial_frames, ref_generated_frames], dim=1)
+                ref_video_frames = ref_all_frames[0]
+                
+                ref_filename = f"step_{self.global_step}{suffix}_ref.mp4"
+                ref_video_path = os.path.join(video_dir, ref_filename)
+                
+                frames_to_video(ref_video_frames, ref_video_path, fps=10)
+                print(f"  Saved reference video: {ref_video_path}")
+            
         except Exception as e:
             print(f"  Warning: Failed to save video: {e}")
 

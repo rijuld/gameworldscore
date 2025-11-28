@@ -92,8 +92,8 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=2,
-        help="Training batch size (need >1 for GRPO, 4 may OOM)",
+        default=4,
+        help="Training batch size (GRPO needs >=4 for stable normalization)",
     )
     parser.add_argument(
         "--n-prompt-frames",
@@ -124,20 +124,38 @@ def parse_args():
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=1e-5,
-        help="Learning rate",
+        default=5e-7,
+        help="Learning rate (conservative for GRPO stability)",
     )
     parser.add_argument(
-        "--ppo-epochs",
+        "--grpo-epochs",
         type=int,
-        default=1,
-        help="PPO update epochs per step",
+        default=4,
+        help="GRPO update epochs per step (higher = more sample efficient)",
     )
     parser.add_argument(
         "--clip-ratio",
         type=float,
         default=0.2,
-        help="PPO clip ratio",
+        help="PPO clip ratio for policy updates",
+    )
+    parser.add_argument(
+        "--log-ratio-clip",
+        type=float,
+        default=2.0,
+        help="Clamp log(ratio) before exp() to prevent overflow (CRITICAL for stability)",
+    )
+    parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=1.0,
+        help="Gradient clipping threshold",
+    )
+    parser.add_argument(
+        "--reward-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for rewards",
     )
     
     # Reward weights
@@ -189,9 +207,9 @@ def parse_args():
     parser.add_argument(
         "--adv-estimator",
         type=str,
-        default="reinforce_plus_plus",
-        choices=["gae", "grpo", "reinforce_plus_plus", "rloo"],
-        help="Advantage estimator type (GRPO needs batch>1)",
+        default="grpo",
+        choices=["gae", "grpo", "reinforce_plus_plus"],
+        help="Advantage estimator (GRPO recommended for stability, needs batch>=4)",
     )
     
     # Checkpointing
@@ -301,7 +319,7 @@ def main():
         args.device = "cpu"
     
     print("=" * 60)
-    print("Oasis RL Finetuning with GameWorldScore Reward")
+    print("Oasis GRPO Finetuning with GameWorldScore Reward")
     print("=" * 60)
     print("\nConfiguration:")
     pprint(vars(args))
@@ -317,10 +335,10 @@ def main():
         print("Please download the model or provide correct path.")
     
     # Import trainer
-    from trainer.oasis_ppo_trainer import OasisPPOConfig, OasisPPOTrainer
+    from trainer.oasis_grpo_trainer import OasisGRPOConfig, OasisGRPOTrainer
     
     # Create config
-    config = OasisPPOConfig(
+    config = OasisGRPOConfig(
         oasis_ckpt=args.oasis_ckpt,
         vae_ckpt=args.vae_ckpt,
         reward_models_dir=args.reward_models_dir,
@@ -333,8 +351,11 @@ def main():
         n_prompt_frames=args.n_prompt_frames,
         max_gen_frames=args.max_gen_frames,
         learning_rate=args.learning_rate,
-        ppo_epochs=args.ppo_epochs,
+        grpo_epochs=args.grpo_epochs,
         clip_ratio=args.clip_ratio,
+        log_ratio_clip=args.log_ratio_clip,
+        grad_clip=args.grad_clip,
+        reward_scale=args.reward_scale,
         rik_weight=args.rik_weight,
         rtc_weight=args.rtc_weight,
         raq_weight=args.raq_weight,
@@ -354,7 +375,7 @@ def main():
     
     # Create trainer
     print("\nInitializing trainer...")
-    trainer = OasisPPOTrainer(config)
+    trainer = OasisGRPOTrainer(config)
     
     # Resume from checkpoint if specified
     if args.resume_from is not None:

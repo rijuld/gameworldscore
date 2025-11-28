@@ -1,8 +1,19 @@
 """
-Training components for Oasis RL finetuning.
+Training components for Oasis GRPO finetuning.
 """
 
-from .oasis_ppo_trainer import OasisPPOTrainer
+from .oasis_grpo_trainer import OasisGRPOTrainer, OasisGRPOConfig, create_oasis_grpo_trainer
 
-__all__ = ["OasisPPOTrainer"]
+# Backwards compatibility aliases
+OasisPPOTrainer = OasisGRPOTrainer
+OasisPPOConfig = OasisGRPOConfig
+
+__all__ = [
+    "OasisGRPOTrainer",
+    "OasisGRPOConfig", 
+    "create_oasis_grpo_trainer",
+    # Backwards compatibility
+    "OasisPPOTrainer",
+    "OasisPPOConfig",
+]
 

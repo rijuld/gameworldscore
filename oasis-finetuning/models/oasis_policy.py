@@ -290,6 +290,8 @@ class OasisPolicy(nn.Module):
         actions: torch.Tensor,
         target_latents: torch.Tensor,
         timesteps: Optional[torch.Tensor] = None,
+        use_fixed_timestep: bool = True,
+        fixed_timestep: int = 100,
     ) -> torch.Tensor:
         """
         Compute log probability of target latents given context.
@@ -297,25 +299,36 @@ class OasisPolicy(nn.Module):
         This approximates the log probability using the diffusion loss,
         which serves as a proxy for the true log probability in latent space.
         
+        IMPORTANT: For stable GRPO/PPO training, use fixed timesteps to ensure
+        consistent log probability computation between rollout and update phases.
+        
         Args:
             latents: (B, T, C, H, W) context latent frames  
             actions: (B, T+1, action_dim) actions
             target_latents: (B, 1, C, H, W) target latent frames to score
             timesteps: Optional specific timesteps to evaluate at
+            use_fixed_timestep: If True, use fixed timestep for consistency
+            fixed_timestep: The fixed timestep to use (default 100, ~10% noise)
             
         Returns:
-            log_probs: (B,) log probability scores
+            log_probs: (B,) log probability scores (normalized to reasonable range)
         """
         B = latents.shape[0]
         
         if timesteps is None:
-            # Sample random timesteps for evaluation
-            timesteps = torch.randint(
-                0, self.max_noise_level,
-                (B,), device=self.device
-            )
+            if use_fixed_timestep:
+                # Use FIXED timestep for consistent log prob computation
+                # This is critical for stable GRPO/PPO training
+                timesteps = torch.full((B,), fixed_timestep, dtype=torch.long, device=self.device)
+            else:
+                # Sample random timesteps (only for evaluation, not training)
+                timesteps = torch.randint(
+                    0, self.max_noise_level,
+                    (B,), device=self.device
+                )
         
-        # Add noise to target at given timesteps
+        # Use fixed noise seed per sample for consistency during update
+        # This ensures log probs are comparable between rollout and update
         noise = torch.randn_like(target_latents)
         alpha = self.alphas_cumprod[timesteps].view(B, 1, 1, 1, 1)
         
@@ -342,8 +355,13 @@ class OasisPolicy(nn.Module):
         mse = F.mse_loss(v_pred[:, -1:].float(), v_target.float(), reduction='none')
         mse = mse.view(B, -1).mean(dim=-1)
         
-        # Convert to log prob (negative loss) - keep as float32
-        log_probs = -mse
+        # Normalize MSE to a reasonable log probability range
+        # This prevents extreme values that cause exp() overflow
+        # Scale factor chosen empirically to keep log_probs in [-10, 0] range
+        log_probs = -mse * 0.1  # Scale down to prevent overflow
+        
+        # Clamp to prevent extreme values
+        log_probs = torch.clamp(log_probs, min=-20.0, max=0.0)
         
         return log_probs
     

@@ -26,12 +26,26 @@ if str(RLVR_PATH) not in sys.path:
 print("sys.path[0]:", sys.path[0])
 
 try:
+    if not RLVR_PATH.exists():
+        raise ImportError(f"Path {RLVR_PATH} does not exist")
+    
+    if not (RLVR_PATH / "verl").exists():
+        raise ImportError(f"Package directory {RLVR_PATH}/verl does not exist")
+
     import verl
     print("Successfully imported verl")
     print("verl file:", verl.__file__)
     from verl import DataProto
     print("Successfully imported DataProto")
 except ImportError as e:
-    print(f"ImportError: {e}")
+    print(f"\n{'!'*80}")
+    print(f"WARNING: RLVR-World integration failed.")
+    print(f"Path checked: {RLVR_PATH}")
+    print(f"Error: {e}")
+    print(f"{'-'*80}")
+    print("Troubleshooting:")
+    print("1. If using git submodules, run: git submodule update --init --recursive")
+    print("2. If RLVR-World is in a different location, set RLVR_WORLD_PATH env var")
+    print(f"{'!'*80}\n")
 except Exception as e:
     print(f"Error: {e}")

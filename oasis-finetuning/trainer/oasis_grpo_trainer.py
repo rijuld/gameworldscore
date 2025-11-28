@@ -44,14 +44,27 @@ if str(RLVR_PATH) not in sys.path:
     sys.path.insert(0, str(RLVR_PATH))
 
 try:
+    if not RLVR_PATH.exists():
+        raise ImportError(f"Path {RLVR_PATH} does not exist")
+    
+    if not (RLVR_PATH / "verl").exists():
+        raise ImportError(f"Package directory {RLVR_PATH}/verl does not exist")
+
     from verl import DataProto
     from verl.trainer.ppo import core_algos
     from verl.utils.torch_functional import masked_mean
     RLVR_AVAILABLE = True
 except ImportError as e:
-    print(f"Warning: RLVR-World not found at {RLVR_PATH}. GRPO will not work correctly.")
-    print(f"  Error: {e}")
-    print("  Please ensure RLVR-World submodule is initialized or set RLVR_WORLD_PATH env var.")
+    print(f"\n{'!'*80}")
+    print(f"WARNING: RLVR-World integration failed.")
+    print(f"Path checked: {RLVR_PATH}")
+    print(f"Error: {e}")
+    print(f"{'-'*80}")
+    print("Troubleshooting:")
+    print("1. If using git submodules, run: git submodule update --init --recursive")
+    print("2. If RLVR-World is in a different location, set RLVR_WORLD_PATH env var")
+    print(f"{'!'*80}\n")
+    
     RLVR_AVAILABLE = False
     DataProto = None
 

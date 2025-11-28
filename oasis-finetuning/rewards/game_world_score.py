@@ -76,7 +76,6 @@ class GameWorldScoreReward(nn.Module):
         # Settings
         device: str = "cuda",
         action_dim: int = 25,
-        use_motion_smoothness: bool = False,
         require_vpt: bool = True,
     ):
         super().__init__()
@@ -97,17 +96,17 @@ class GameWorldScoreReward(nn.Module):
         )
         
         self.rtc = TemporalConsistencyReward(
-            clip_model_path=clip_model_path,
+            clip_model_path=clip_model_path,  # Kept for compatibility, but RTC now uses RAFT
             device=device,
-            use_motion_smoothness=use_motion_smoothness,
         )
         
-        # Share CLIP model between RTC and RAQ to save ~1.7GB GPU memory
+        # Note: RTC now uses RAFT optical flow instead of CLIP
+        # RAQ uses CLIP for aesthetic scoring, so it loads its own CLIP model
         self.raq = AestheticQualityReward(
             clip_model_path=clip_model_path,
             aesthetic_checkpoint=aesthetic_checkpoint,
             device=device,
-            shared_clip_model=self.rtc.clip_model,  # Reuse RTC's CLIP
+            shared_clip_model=None,  # RAQ will load its own CLIP model
         )
     
     @torch.no_grad()
@@ -306,7 +305,6 @@ def create_game_world_score_reward(
     rtc_weight: float = 1.0,
     raq_weight: float = 1.0,
     require_vpt: bool = True,
-    use_motion_smoothness: bool = False,
 ) -> GameWorldScoreReward:
     """
     Create GameWorldScore reward with models from the specified directory.
@@ -356,6 +354,5 @@ def create_game_world_score_reward(
         raq_weight=raq_weight,
         device=device,
         require_vpt=require_vpt,
-        use_motion_smoothness=use_motion_smoothness,
     )
 

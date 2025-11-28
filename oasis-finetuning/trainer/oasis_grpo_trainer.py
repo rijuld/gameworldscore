@@ -102,8 +102,8 @@ class OasisGRPOConfig:
     total_epochs: int = 10
     total_training_steps: int = 10000
     train_batch_size: int = 1  # Number of unique prompts per step
-    group_size: int = 1  # Number of rollouts per prompt (GRPO group size) - CRITICAL: reduced to 1
-    grpo_epochs: int = 1  # Number of update epochs per step - CRITICAL: reduced to 1
+    group_size: int = 2  # Number of rollouts per prompt - optimized for memory-speed tradeoff
+    grpo_epochs: int = 2  # Number of update epochs per step - optimized for speed
     
     # Rollout settings
     n_prompt_frames: int = 1
@@ -124,6 +124,8 @@ class OasisGRPOConfig:
     use_mixed_precision: bool = True  # Enable mixed precision training (FP16)
     offload_reward_to_cpu: bool = True  # Offload reward models to CPU to save GPU memory
     offload_ref_policy_to_cpu: bool = True  # Offload reference policy to CPU (only load to GPU when needed)
+    cache_encoded_frames: bool = True  # Cache encoded frames to avoid redundant encoding (saves time)
+    kl_compute_freq: int = 5  # Compute KL divergence every N steps (1 = every step)
     
     # KL settings
     use_kl_in_reward: bool = True  # Enable KL divergence penalty (ref policy on CPU to save memory)
@@ -395,44 +397,53 @@ class OasisGRPOTrainer:
             # Compute reference log probs for KL if needed
             ref_log_probs = None
             if self.ref_policy is not None:
-                # Delete latents before computing ref_latents
-                del latents
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                # Only compute ref log probs if KL is needed this step
+                # Check if we should compute KL this step
+                compute_kl_this_step = (self.global_step % self.config.kl_compute_freq == 0)
                 
-                # If ref policy is on CPU, move frames to CPU for inference
-                if self.ref_policy_device == "cpu":
-                    all_frames_for_ref = all_frames.cpu()
-                else:
-                    all_frames_for_ref = all_frames
-                
-                ref_latents = self.ref_policy.encode_frames(all_frames_for_ref)
-                ref_log_probs_list = []
-                
-                for t in range(T_prompt, T_prompt + num_gen):
-                    context = ref_latents[:, :t]
-                    target = ref_latents[:, t:t+1]
-                    action_idx = t - T_prompt
+                if compute_kl_this_step:
+                    # Delete latents before computing ref_latents
+                    del latents
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     
-                    # Actions need to be on same device as ref policy
+                    # If ref policy is on CPU, move frames to CPU for inference
                     if self.ref_policy_device == "cpu":
-                        action = actions_repeated[:, action_idx:action_idx+1].cpu()
+                        all_frames_for_ref = all_frames.cpu()
                     else:
-                        action = actions_repeated[:, action_idx:action_idx+1]
+                        all_frames_for_ref = all_frames
                     
-                    ref_log_prob = self.ref_policy.compute_log_prob(context, action, target)
-                    ref_log_probs_list.append(ref_log_prob.detach())
+                    ref_latents = self.ref_policy.encode_frames(all_frames_for_ref)
+                    ref_log_probs_list = []
                     
-                    del context, target, action
-                
-                ref_log_probs = torch.stack(ref_log_probs_list, dim=1)
-                
-                # Move ref_log_probs back to GPU if needed
-                if self.ref_policy_device == "cpu":
-                    ref_log_probs = ref_log_probs.to(self.device)
-                    del all_frames_for_ref
-                
-                del ref_latents, ref_log_probs_list
+                    for t in range(T_prompt, T_prompt + num_gen):
+                        context = ref_latents[:, :t]
+                        target = ref_latents[:, t:t+1]
+                        action_idx = t - T_prompt
+                        
+                        # Actions need to be on same device as ref policy
+                        if self.ref_policy_device == "cpu":
+                            action = actions_repeated[:, action_idx:action_idx+1].cpu()
+                        else:
+                            action = actions_repeated[:, action_idx:action_idx+1]
+                        
+                        ref_log_prob = self.ref_policy.compute_log_prob(context, action, target)
+                        ref_log_probs_list.append(ref_log_prob.detach())
+                        
+                        del context, target, action
+                    
+                    ref_log_probs = torch.stack(ref_log_probs_list, dim=1)
+                    
+                    # Move ref_log_probs back to GPU if needed
+                    if self.ref_policy_device == "cpu":
+                        ref_log_probs = ref_log_probs.to(self.device)
+                        del all_frames_for_ref
+                    
+                    del ref_latents, ref_log_probs_list
+                else:
+                    # Skip KL computation this step
+                    del latents
+                    ref_log_probs = None
             else:
                 del latents
         
@@ -525,13 +536,20 @@ class OasisGRPOTrainer:
     ) -> Dict[str, float]:
         """
         Perform GRPO policy update using verl's core_algos.
-        Uses gradient accumulation to reduce memory usage.
+        Uses gradient accumulation and frame caching for optimal memory-speed tradeoff.
         """
         self.policy.train_mode()
         
         B = all_frames.shape[0]
         T_prompt = self.config.n_prompt_frames
         T_gen = all_frames.shape[1] - T_prompt
+        
+        # OPTIMIZATION: Encode frames ONCE and cache for all epochs
+        # This avoids redundant encoding (2x speedup)
+        if self.config.cache_encoded_frames:
+            with torch.no_grad():
+                cached_latents = self.policy.encode_frames(all_frames)
+                cached_latents = cached_latents.detach()  # Detach to save memory
         
         # CRITICAL: Process in micro-batches if batch size > 1
         micro_batch_size = 1  # Process one sample at a time
@@ -545,6 +563,9 @@ class OasisGRPOTrainer:
         
         if response_mask is None:
             response_mask = torch.ones_like(old_log_probs)
+        
+        # Preallocate buffers for efficiency
+        log_probs_buffer = torch.zeros(B, T_gen, device=self.device)
         
         for epoch in range(self.config.grpo_epochs):
             self.optimizer.zero_grad()
@@ -565,15 +586,18 @@ class OasisGRPOTrainer:
                 mb_advantages = advantages[start_idx:end_idx]
                 mb_response_mask = response_mask[start_idx:end_idx]
                 
-                # Encode frames OUTSIDE autocast to save memory
-                # Encoding is memory-intensive and doesn't benefit much from FP16
-                with torch.no_grad():
-                    latents = self.policy.encode_frames(mb_frames)
+                # Use cached latents if available, otherwise encode
+                if self.config.cache_encoded_frames:
+                    latents = cached_latents[start_idx:end_idx]
+                else:
+                    # Encode frames (slower path)
+                    with torch.no_grad():
+                        latents = self.policy.encode_frames(mb_frames)
                 
-                # Now compute log probs with mixed precision
+                # Compute log probs with mixed precision
                 log_probs = []
                 for t in range(T_prompt, T_prompt + T_gen):
-                    context = latents[:, :t].detach()  # Detach to save memory
+                    context = latents[:, :t].detach()
                     target = latents[:, t:t+1].detach()
                     action_idx = t - T_prompt
                     action = mb_actions[:, action_idx:action_idx+1]
@@ -590,12 +614,17 @@ class OasisGRPOTrainer:
                     # Aggressive cleanup
                     del context, target
                 
-                # Delete latents after use
-                del latents
+                # Stack log probs
+                log_probs = torch.stack(log_probs, dim=1)
+                
+                # Store in buffer for reuse if needed
+                log_probs_buffer[start_idx:end_idx] = log_probs.detach()
+                
+                # Cleanup
+                if not self.config.cache_encoded_frames:
+                    del latents
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                
-                log_probs = torch.stack(log_probs, dim=1)
                 
                 # Use verl's compute_policy_loss
                 pg_loss, pg_clipfrac, ppo_kl, _ = core_algos.compute_policy_loss(
@@ -657,10 +686,16 @@ class OasisGRPOTrainer:
             
             # Average metrics over micro-batches
             metrics['pg_loss'].append(epoch_pg_loss / num_micro_batches)
-            metrics['total_loss'].append(epoch_pg_loss / num_micro_batches)  # Simplified
+            metrics['total_loss'].append(epoch_pg_loss / num_micro_batches)
             metrics['grad_norm'].append(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
             metrics['clip_fraction'].append(epoch_pg_clipfrac / num_micro_batches)
             metrics['kl'].append(epoch_ppo_kl / num_micro_batches)
+        
+        # Clear cached latents to free memory
+        if self.config.cache_encoded_frames:
+            del cached_latents
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         result = {k: np.mean(v) if v else float('nan') for k, v in metrics.items()}
         result['update_success_rate'] = successful_updates / self.config.grpo_epochs

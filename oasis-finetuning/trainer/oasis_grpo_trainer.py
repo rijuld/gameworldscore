@@ -1064,7 +1064,7 @@ class OasisGRPOTrainer:
         
         print(f"{progress_info} | "
               f"gen={gen_time:.2f}s, reward={reward_time:.2f}s, update={grpo_time:.2f}s | "
-              f"RIK={rik_val:.3f}, RTC={rtc_val:.3f}, RAQ={raq_val:.3f} | "
+              f"Reward={reward_mean:.3f} (RIK={rik_val:.3f}, RTC={rtc_val:.3f}, RAQ={raq_val:.3f}) | "
               f"loss={metrics['train/total_loss']:.4f}, grad={metrics['train/grad_norm']:.4f}",
               flush=True)
         

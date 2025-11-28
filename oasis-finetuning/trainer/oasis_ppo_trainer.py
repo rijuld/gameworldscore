@@ -71,12 +71,12 @@ class OasisPPOConfig:
     n_rollouts: int = 1
     
     # PPO hyperparameters
-    learning_rate: float = 1e-5
+    learning_rate: float = 1e-6  # Reduced for stability (was 1e-5)
     gamma: float = 0.99
     lam: float = 0.95
-    clip_ratio: float = 0.2
+    clip_ratio: float = 0.1  # Reduced for stability (was 0.2)
     entropy_coeff: float = 0.01
-    grad_clip: float = 0.5  # Reduced to prevent gradient explosion
+    grad_clip: float = 0.1  # Aggressive clipping to prevent explosion (was 0.5)
     
     # KL settings
     use_kl_in_reward: bool = False
@@ -535,6 +535,18 @@ class OasisPPOTrainer:
             # Backward pass with gradient scaling for mixed precision
             self.optimizer.zero_grad()
             
+            # Skip update if loss is NaN/Inf
+            if not torch.isfinite(total_loss):
+                print(f"  ⚠️  Skipping update: loss is {total_loss.item()}")
+                grad_norm = float('nan')
+                metrics['pg_loss'].append(float('nan'))
+                metrics['entropy'].append(0.0)
+                metrics['entropy_loss'].append(0.0)
+                metrics['total_loss'].append(float('nan'))
+                metrics['grad_norm'].append(float('nan'))
+                metrics['clip_fraction'].append(0.0)
+                continue
+            
             # Scale loss for mixed precision stability
             if hasattr(self, 'grad_scaler'):
                 self.grad_scaler.scale(total_loss).backward()
@@ -549,6 +561,18 @@ class OasisPPOTrainer:
                 else:
                     grad_norm = 0.0
                 
+                # Skip if gradients are NaN/Inf
+                if not torch.isfinite(grad_norm):
+                    print(f"  ⚠️  Skipping update: grad_norm is {grad_norm.item()}")
+                    self.grad_scaler.update()  # Still update scaler
+                    metrics['pg_loss'].append(pg_loss.item() if torch.isfinite(pg_loss) else float('nan'))
+                    metrics['entropy'].append(entropy.item())
+                    metrics['entropy_loss'].append(entropy_loss.item())
+                    metrics['total_loss'].append(float('nan'))
+                    metrics['grad_norm'].append(float('nan'))
+                    metrics['clip_fraction'].append(clip_frac if 'clip_frac' in dir() else 0.0)
+                    continue
+                
                 self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
             else:
@@ -562,6 +586,18 @@ class OasisPPOTrainer:
                     )
                 else:
                     grad_norm = 0.0
+                
+                # Skip if gradients are NaN/Inf
+                if isinstance(grad_norm, torch.Tensor) and not torch.isfinite(grad_norm):
+                    print(f"  ⚠️  Skipping update: grad_norm is {grad_norm.item()}")
+                    self.optimizer.zero_grad()  # Clear the bad gradients
+                    metrics['pg_loss'].append(float('nan'))
+                    metrics['entropy'].append(entropy.item())
+                    metrics['entropy_loss'].append(entropy_loss.item())
+                    metrics['total_loss'].append(float('nan'))
+                    metrics['grad_norm'].append(float('nan'))
+                    metrics['clip_fraction'].append(0.0)
+                    continue
                 
                 self.optimizer.step()
             

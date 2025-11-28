@@ -44,15 +44,15 @@ training:
   total_training_steps: 10000
   ppo_epochs: 1
   ppo_mini_batch_size: 4
-  learning_rate: 1.0e-5
+  learning_rate: 1.0e-6  # Reduced for stability (was 1e-5)
   weight_decay: 0.01
-  grad_clip: 0.5  # Reduced to prevent gradient explosion
+  grad_clip: 0.1  # Aggressive clipping to prevent explosion (was 0.5)
   
 # PPO hyperparameters
 ppo:
   gamma: 0.99
   lam: 0.95
-  clip_ratio: 0.2
+  clip_ratio: 0.1  # Reduced for stability (was 0.2)
   entropy_coeff: 0.01  # Entropy bonus for exploration
   
 # KL regularization

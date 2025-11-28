@@ -155,8 +155,13 @@ class TemporalConsistencyRewardV2(nn.Module):
         if scale == 1.0:
             return x
         B, C, H, W = x.shape
-        newH = max(2, int(round(H * scale)))
-        newW = max(2, int(round(W * scale)))
+        newH = max(8, int(round(H * scale)))
+        newW = max(8, int(round(W * scale)))
+        
+        # Ensure divisibility by 8 for RAFT
+        newH = ((newH + 7) // 8) * 8
+        newW = ((newW + 7) // 8) * 8
+        
         return F.interpolate(x, size=(newH, newW), mode='bilinear', align_corners=False)
 
     def _make_grid(self, B: int, H: int, W: int, device: torch.device):

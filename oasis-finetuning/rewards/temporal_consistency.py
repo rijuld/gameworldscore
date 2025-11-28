@@ -152,11 +152,18 @@ class TemporalConsistencyRewardV2(nn.Module):
         return img * 255.0
 
     def _resize(self, x: torch.Tensor, scale: float) -> torch.Tensor:
+        B, C, H, W = x.shape
+        
+        # Determine effective scale to ensure min dimension >= 128 (required by RAFT)
+        min_dim = min(H, W)
+        if min_dim * scale < 128:
+            scale = 128.0 / min_dim
+            
         if scale == 1.0:
             return x
-        B, C, H, W = x.shape
-        newH = max(8, int(round(H * scale)))
-        newW = max(8, int(round(W * scale)))
+            
+        newH = int(round(H * scale))
+        newW = int(round(W * scale))
         
         # Ensure divisibility by 8 for RAFT
         newH = ((newH + 7) // 8) * 8

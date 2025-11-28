@@ -181,27 +181,21 @@ class GameWorldScoreReward(nn.Module):
         """
         import time
         
-        # Time RIK (batched)
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        # Time RIK (batched) - removed unnecessary syncs for speed
         rik_start = time.perf_counter()
         rik_rewards, rik_info = self.rik.compute_sequence_reward(frames, actions)
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
         rik_time_total = time.perf_counter() - rik_start
         
-        # Time RTC (batched)
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        # Time RTC (batched) - removed unnecessary syncs for speed
         rtc_start = time.perf_counter()
         rtc_rewards, rtc_info = self.rtc.compute_sequence_reward(frames)
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
         rtc_time_total = time.perf_counter() - rtc_start
         
         # Time RAQ (batched - note: RAQ is per-frame, so we need T rewards)
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
         raq_start = time.perf_counter()
         raq_rewards_all, raq_info = self.raq.compute_sequence_reward(frames)
         # RAQ is (B, T), but we need (B, T-1) to match transitions
         raq_rewards = raq_rewards_all[:, 1:]  # Skip first frame (context)
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
         raq_time_total = time.perf_counter() - raq_start
         
         # Weighted combination: (B, T-1)

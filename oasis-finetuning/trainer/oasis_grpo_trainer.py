@@ -1021,7 +1021,8 @@ class OasisGRPOTrainer:
         print(f"{progress_info} | "
               f"gen={gen_time:.2f}s, reward={reward_time:.2f}s, update={grpo_time:.2f}s | "
               f"RIK={rik_val:.3f}, RTC={rtc_val:.3f}, RAQ={raq_val:.3f} | "
-              f"loss={metrics['train/total_loss']:.4f}, grad={metrics['train/grad_norm']:.4f}")
+              f"loss={metrics['train/total_loss']:.4f}, grad={metrics['train/grad_norm']:.4f}",
+              flush=True)
         
         return metrics
     
@@ -1106,13 +1107,16 @@ class OasisGRPOTrainer:
         if path is None:
             path = os.path.join(self.config.checkpoint_dir, f"step_{self.global_step}")
         os.makedirs(path, exist_ok=True)
+        
+        # Save checkpoint (this can be slow for large models)
+        checkpoint_path = os.path.join(path, 'checkpoint.pt')
         torch.save({
             'model_state_dict': self.policy.dit.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'global_step': self.global_step,
             'config': self.config.__dict__,
-        }, os.path.join(path, 'checkpoint.pt'))
-        print(f"Saved checkpoint to {path}")
+        }, checkpoint_path)
+        print(f"\nSaved checkpoint to {path}", flush=True)
 
 def create_oasis_grpo_trainer(oasis_ckpt, vae_ckpt, reward_models_dir="models_for_rl_finetuning", **kwargs):
     config = OasisGRPOConfig(oasis_ckpt=oasis_ckpt, vae_ckpt=vae_ckpt, reward_models_dir=reward_models_dir, **kwargs)

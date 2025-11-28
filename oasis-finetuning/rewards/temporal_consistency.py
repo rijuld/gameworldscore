@@ -43,6 +43,9 @@ class TemporalConsistencyReward(nn.Module):
         self.clip_processor = CLIPProcessor.from_pretrained(clip_model_path, use_fast=True)
         self.clip_model = self.clip_model.to(device).eval()
         
+        # Enable half precision inference on GPU for faster computation (2x speedup)
+        self.use_half_precision = (device == "cuda")
+        
         # Freeze CLIP
         for param in self.clip_model.parameters():
             param.requires_grad = False
@@ -89,8 +92,13 @@ class TemporalConsistencyReward(nn.Module):
             features: (B, feature_dim) CLIP features
         """
         images = self._preprocess_for_clip(images)
-        features = self.clip_model.get_image_features(images)
-        features = F.normalize(features, p=2, dim=-1)
+        # Use autocast for half precision on GPU (2x speedup, minimal accuracy loss)
+        if self.use_half_precision:
+            with torch.amp.autocast('cuda', dtype=torch.float16):
+                features = self.clip_model.get_image_features(images)
+        else:
+            features = self.clip_model.get_image_features(images)
+        features = F.normalize(features.float(), p=2, dim=-1)  # Normalize in float32 for stability
         return features
     
     @torch.no_grad()

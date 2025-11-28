@@ -13,7 +13,7 @@ Key Components:
 
 from .models.oasis_policy import OasisPolicy
 from .rewards.game_world_score import GameWorldScoreReward
-from .trainer.oasis_ppo_trainer import OasisPPOTrainer
+from .trainer import OasisPPOTrainer
 
 __version__ = "0.1.0"
 __all__ = ["OasisPolicy", "GameWorldScoreReward", "OasisPPOTrainer"]

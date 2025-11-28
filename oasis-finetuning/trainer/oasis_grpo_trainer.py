@@ -463,9 +463,12 @@ class OasisGRPOTrainer:
             # Compute reference log probs for KL if needed
             ref_log_probs = None
             if self.ref_policy is not None:
-                # Only compute ref log probs if KL is needed this step
-                # Check if we should compute KL this step
-                compute_kl_this_step = (self.global_step % self.config.kl_compute_freq == 0)
+                # Always compute ref log probs if KL is needed in rewards
+                # Otherwise, compute based on kl_compute_freq (for logging only)
+                if self.config.use_kl_in_reward:
+                    compute_kl_this_step = True  # Always compute if used in rewards
+                else:
+                    compute_kl_this_step = (self.global_step % self.config.kl_compute_freq == 0)
                 
                 if compute_kl_this_step:
                     # Delete latents before computing ref_latents to free GPU memory
@@ -607,25 +610,11 @@ class OasisGRPOTrainer:
         # Convert indices to numpy for verl
         indices_np = indices.cpu().numpy()
         
-        # Debug logging
-        if self.global_step % 10 == 0:
-            print(f"\n  [DEBUG] Advantage Computation:")
-            print(f"    Rewards shape: {rewards.shape}")
-            print(f"    Rewards range: [{rewards.min():.4f}, {rewards.max():.4f}]")
-            print(f"    Scaled rewards range: [{scaled_rewards.min():.4f}, {scaled_rewards.max():.4f}]")
-            print(f"    Indices: {indices_np}")
-            print(f"    Unique indices: {np.unique(indices_np)}")
-        
         advantages, _ = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=scaled_rewards,
             response_mask=response_mask,
             index=indices_np,
         )
-        
-        # Debug logging
-        if self.global_step % 10 == 0:
-            print(f"    Advantages range: [{advantages.min():.4f}, {advantages.max():.4f}]")
-            print(f"    Advantages mean: {advantages.mean():.4f}, std: {advantages.std():.4f}")
         
         info = {
             'advantage_mean': advantages.mean().item(),
@@ -826,7 +815,7 @@ class OasisGRPOTrainer:
         
         return result
     
-    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    def train_step(self, batch: Dict[str, torch.Tensor], pbar=None) -> Dict[str, float]:
         """Execute a single training step."""
         import time
         import gc
@@ -849,11 +838,9 @@ class OasisGRPOTrainer:
         target_actions = actions[:, :self.config.max_gen_frames]
         
         # 1. Generate rollouts (with group repetition)
-        print(f"  [Profile] Starting Rollout Generation...")
         gen_start = time.perf_counter()
         rollout_data = self._generate_rollouts(initial_frames, target_actions)
         gen_time = time.perf_counter() - gen_start
-        print(f"  [Profile] Generation finished in {gen_time:.2f}s")
         
         # Delete initial_frames after rollout generation
         del initial_frames, target_actions
@@ -861,37 +848,82 @@ class OasisGRPOTrainer:
             torch.cuda.empty_cache()
         
         # 2. Compute rewards (frames stay on GPU if reward models are on GPU)
-        print(f"  [Profile] Starting Reward Computation...")
         reward_start = time.perf_counter()
         rewards, reward_info = self._compute_rewards(
             rollout_data['all_frames'],
             rollout_data['actions'],
         )
         reward_time = time.perf_counter() - reward_start
-        print(f"  [Profile] Reward computation finished in {reward_time:.2f}s")
         
         # Ensure rewards are on GPU
         if rewards.device != self.device:
             rewards = rewards.to(self.device)
         
-        # Print detailed reward breakdown immediately
-        print(f"  [Rewards] Mean Total: {rewards.mean().item():.4f}")
-        if 'reward/rik' in reward_info:
-            print(f"    RIK (Inverse Kinematics): {reward_info.get('reward/rik', 0):.4f}")
-        if 'reward/rtc' in reward_info:
-            print(f"    RTC (Temporal Consistency): {reward_info.get('reward/rtc', 0):.4f}")
-        if 'reward/raq' in reward_info:
-            print(f"    RAQ (Aesthetic Quality): {reward_info.get('reward/raq', 0):.4f}")
+        # Apply KL penalty to rewards if enabled
+        if (self.config.use_kl_in_reward and 
+            hasattr(self, 'kl_controller') and 
+            rollout_data.get('ref_log_probs') is not None):
+            # Compute KL divergence between current and reference policy
+            old_log_probs = rollout_data['log_probs']  # (B*G, T_gen)
+            ref_log_probs = rollout_data['ref_log_probs']  # (B*G, T_gen)
+            
+            # Ensure same device
+            if old_log_probs.device != self.device:
+                old_log_probs = old_log_probs.to(self.device)
+            if ref_log_probs.device != self.device:
+                ref_log_probs = ref_log_probs.to(self.device)
+            
+            # Create response mask (all ones for generated frames)
+            response_mask = torch.ones_like(rewards, dtype=torch.float32)
+            
+            # Compute KL penalty (old_log_probs - ref_log_probs)
+            # Note: kl_penalty expects (logprob, ref_logprob), returns logprob - ref_logprob
+            kld = core_algos.kl_penalty(
+                logprob=old_log_probs,
+                ref_logprob=ref_log_probs,
+                kl_penalty='kl'
+            )  # (B*G, T_gen)
+            
+            # Apply response mask to KL divergence
+            kld = kld * response_mask
+            
+            # Get adaptive KL coefficient
+            beta = self.kl_controller.value
+            
+            # Apply KL penalty to rewards: rewards = rewards - beta * kld
+            # This penalizes policies that deviate from the reference policy
+            rewards = rewards - beta * kld
+            
+            # Update KL controller using masked mean (following RLVR-World pattern)
+            # Average KL over sequence length, then over batch
+            current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # Average over time: (B*G,)
+            current_kl = torch.mean(current_kl, dim=0).item()  # Average over batch: scalar
+            
+            # Update KL controller
+            batch_size = rewards.shape[0]
+            self.kl_controller.update(current_kl=current_kl, n_steps=batch_size)
+            
+            # Add KL metrics to reward_info
+            reward_info['kl_penalty'] = current_kl
+            reward_info['kl_coeff'] = beta
+            reward_info['kl_penalty_applied'] = True
+            
+            # Clean up
+            del old_log_probs, ref_log_probs, kld, response_mask
+        else:
+            reward_info['kl_penalty_applied'] = False
+            if self.config.use_kl_in_reward and not hasattr(self, 'kl_controller'):
+                reward_info['kl_penalty_warning'] = 'KL controller not initialized'
+            elif self.config.use_kl_in_reward and rollout_data.get('ref_log_probs') is None:
+                reward_info['kl_penalty_warning'] = 'ref_log_probs not available'
         
         # 3. Compute advantages (GRPO)
-        print(f"  [Profile] Starting Advantage Computation...")
         adv_start = time.perf_counter()
         advantages, adv_info = self._compute_advantages(
             rewards,
             rollout_data['indices'],
         )
         adv_time = time.perf_counter() - adv_start
-        print(f"  [Profile] Advantage computation finished in {adv_time:.2f}s")
         
         # Save reward statistics before deleting
         reward_mean = rewards.mean().item()
@@ -901,7 +933,6 @@ class OasisGRPOTrainer:
         del rewards
         
         # 4. Update policy (ensure all data is on GPU)
-        print(f"  [Profile] Starting GRPO Update...")
         grpo_start = time.perf_counter()
         
         # Ensure all inputs are on GPU
@@ -925,7 +956,6 @@ class OasisGRPOTrainer:
             advantages,
         )
         grpo_time = time.perf_counter() - grpo_start
-        print(f"  [Profile] GRPO Update finished in {grpo_time:.2f}s")
         
         # Clean up rollout data and free GPU memory
         del rollout_data, advantages, rollout_frames, rollout_actions, rollout_log_probs
@@ -946,33 +976,50 @@ class OasisGRPOTrainer:
             'time/grpo_update_sec': grpo_time,
         }
         
-        print(f"  Step {self.global_step}: R={metrics['reward/mean']:.3f}, "
-              f"L={metrics['train/total_loss']:.4f}, "
-              f"Clip={metrics['train/clip_fraction']:.2f}")
+        # Concise logging: times, sub-rewards, loss, grad norm
+        rik_val = reward_info.get('rik_reward', reward_info.get('reward/rik', 0.0))
+        rtc_val = reward_info.get('rtc_reward', reward_info.get('reward/rtc', 0.0))
+        raq_val = reward_info.get('raq_reward', reward_info.get('reward/raq', 0.0))
         
-        # Detailed logging every 10 steps
-        if self.global_step % 10 == 0:
-            print(f"\n  === Detailed Metrics (Step {self.global_step}) ===")
-            print(f"  Rewards: mean={reward_mean:.4f}, std={reward_std:.4f}")
-            print(f"  Advantages: mean={adv_info.get('advantage_mean', 0):.4f}, "
-                  f"std={adv_info.get('advantage_std', 0):.4f}")
-            print(f"  Policy Loss: {metrics['train/pg_loss']:.4f}")
-            print(f"  Total Loss: {metrics['train/total_loss']:.4f}")
-            print(f"  Grad Norm: {metrics['train/grad_norm']:.4f}")
-            print(f"  Clip Fraction: {metrics['train/clip_fraction']:.4f}")
-            print(f"  KL Divergence: {metrics['train/kl']:.4f}")
-            print(f"  Learning Rate: {metrics['train/learning_rate']:.2e}")
+        # Format progress bar info if available (matches tqdm format: "8/32400 [03:50<198:35:32, 22.07s/it]")
+        if pbar is not None:
+            n = pbar.n
+            total = pbar.total if pbar.total else 0
+            fmt_dict = pbar.format_dict
             
-            # Reward breakdown if available
-            if 'reward/rik' in metrics:
-                print(f"  Reward Components:")
-                print(f"    RIK: {metrics.get('reward/rik', 0):.4f}")
-                print(f"    RTC: {metrics.get('reward/rtc', 0):.4f}")
-                print(f"    RAQ: {metrics.get('reward/raq', 0):.4f}")
+            # Get elapsed time in seconds
+            elapsed = fmt_dict.get('elapsed', 0)
+            elapsed_h = int(elapsed // 3600)
+            elapsed_m = int((elapsed % 3600) // 60)
+            elapsed_s = int(elapsed % 60)
+            elapsed_str = f"{elapsed_h*60 + elapsed_m:02d}:{elapsed_s:02d}" if elapsed_h == 0 else f"{elapsed_h:02d}:{elapsed_m:02d}:{elapsed_s:02d}"
             
-            print(f"  Timing: gen={gen_time:.2f}s, reward={reward_time:.2f}s, "
-                  f"update={grpo_time:.2f}s")
-            print(f"  =====================================\n")
+            # Calculate remaining time
+            if total > 0 and n > 0 and elapsed > 0:
+                rate = elapsed / n
+                remaining = rate * (total - n)
+                rem_h = int(remaining // 3600)
+                rem_m = int((remaining % 3600) // 60)
+                rem_s = int(remaining % 60)
+                if rem_h > 0:
+                    remaining_str = f"{rem_h:02d}:{rem_m:02d}:{rem_s:02d}"
+                else:
+                    remaining_str = f"{rem_m:02d}:{rem_s:02d}"
+            else:
+                remaining_str = "??:??:??"
+            
+            # Get rate
+            rate = fmt_dict.get('rate', elapsed / n if n > 0 and elapsed > 0 else 0)
+            rate_str = f"{rate:.2f}s/it" if rate > 0 else "?s/it"
+            
+            progress_info = f"{n}/{total} [{elapsed_str}<{remaining_str}, {rate_str}]"
+        else:
+            progress_info = f"Step {self.global_step}"
+        
+        print(f"{progress_info} | "
+              f"gen={gen_time:.2f}s, reward={reward_time:.2f}s, update={grpo_time:.2f}s | "
+              f"RIK={rik_val:.3f}, RTC={rtc_val:.3f}, RAQ={raq_val:.3f} | "
+              f"loss={metrics['train/total_loss']:.4f}, grad={metrics['train/grad_norm']:.4f}")
         
         return metrics
     
@@ -992,7 +1039,7 @@ class OasisGRPOTrainer:
                 if self.global_step >= self.config.total_training_steps:
                     break
                 
-                metrics = self.train_step(batch)
+                metrics = self.train_step(batch, pbar=epoch_pbar)
                 
                 if self.logger is not None:
                     self.logger.log(metrics, step=self.global_step)

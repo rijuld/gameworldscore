@@ -102,8 +102,8 @@ class OasisGRPOConfig:
     total_epochs: int = 10
     total_training_steps: int = 10000
     train_batch_size: int = 1  # Number of unique prompts per step
-    group_size: int = 2  # Number of rollouts per prompt (GRPO group size) - reduced for memory
-    grpo_epochs: int = 2  # Number of update epochs per step - reduced for memory
+    group_size: int = 1  # Number of rollouts per prompt (GRPO group size) - CRITICAL: reduced to 1
+    grpo_epochs: int = 1  # Number of update epochs per step - CRITICAL: reduced to 1
     
     # Rollout settings
     n_prompt_frames: int = 1
@@ -525,12 +525,17 @@ class OasisGRPOTrainer:
     ) -> Dict[str, float]:
         """
         Perform GRPO policy update using verl's core_algos.
+        Uses gradient accumulation to reduce memory usage.
         """
         self.policy.train_mode()
         
         B = all_frames.shape[0]
         T_prompt = self.config.n_prompt_frames
         T_gen = all_frames.shape[1] - T_prompt
+        
+        # CRITICAL: Process in micro-batches if batch size > 1
+        micro_batch_size = 1  # Process one sample at a time
+        num_micro_batches = max(1, B // micro_batch_size)
         
         metrics = defaultdict(list)
         successful_updates = 0
@@ -542,64 +547,95 @@ class OasisGRPOTrainer:
             response_mask = torch.ones_like(old_log_probs)
         
         for epoch in range(self.config.grpo_epochs):
-            # Use mixed precision if enabled
-            if self.config.use_mixed_precision and self.device == "cuda":
-                with torch.cuda.amp.autocast():
-                    # Compute current log probs
-                    latents = self.policy.encode_frames(all_frames)
-                    
-                    log_probs = []
-                    for t in range(T_prompt, T_prompt + T_gen):
-                        context = latents[:, :t]
-                        target = latents[:, t:t+1]
-                        action_idx = t - T_prompt
-                        action = actions[:, action_idx:action_idx+1]
-                        
-                        log_prob = self.policy.compute_log_prob(context, action, target)
-                        log_probs.append(log_prob)
-                    
-                    log_probs = torch.stack(log_probs, dim=1)
-            else:
-                # Compute current log probs
-                latents = self.policy.encode_frames(all_frames)
-                
-                log_probs = []
-                for t in range(T_prompt, T_prompt + T_gen):
-                    context = latents[:, :t]
-                    target = latents[:, t:t+1]
-                    action_idx = t - T_prompt
-                    action = actions[:, action_idx:action_idx+1]
-                    
-                    log_prob = self.policy.compute_log_prob(context, action, target)
-                    log_probs.append(log_prob)
-                
-                log_probs = torch.stack(log_probs, dim=1)
-            
-            # Use verl's compute_policy_loss
-            pg_loss, pg_clipfrac, ppo_kl, _ = core_algos.compute_policy_loss(
-                old_log_prob=old_log_probs,
-                log_prob=log_probs,
-                advantages=advantages,
-                response_mask=response_mask,
-                cliprange=self.config.clip_ratio,
-                loss_agg_mode="token-mean"
-            )
-            
-            # Entropy loss
-            # verl's compute_entropy_loss requires logits, but we have log_probs
-            # We can approximate entropy from log_probs: -sum(p * log(p))
-            # But we only have log_prob of the sampled action.
-            # Simple proxy: -mean(log_prob)
-            entropy_proxy = -log_probs.mean()
-            entropy_loss = -self.config.entropy_coeff * entropy_proxy
-            
-            total_loss = pg_loss + entropy_loss
-            
-            # Optimization step
             self.optimizer.zero_grad()
             
-            if hasattr(self, 'grad_scaler'):
-                self.grad_scaler.scale(total_loss).backward()
+            epoch_pg_loss = 0
+            epoch_pg_clipfrac = 0
+            epoch_ppo_kl = 0
+            
+            # Process in micro-batches
+            for mb_idx in range(num_micro_batches):
+                start_idx = mb_idx * micro_batch_size
+                end_idx = min((mb_idx + 1) * micro_batch_size, B)
+                
+                # Get micro-batch
+                mb_frames = all_frames[start_idx:end_idx]
+                mb_actions = actions[start_idx:end_idx]
+                mb_old_log_probs = old_log_probs[start_idx:end_idx]
+                mb_advantages = advantages[start_idx:end_idx]
+                mb_response_mask = response_mask[start_idx:end_idx]
+                
+                # Encode frames OUTSIDE autocast to save memory
+                # Encoding is memory-intensive and doesn't benefit much from FP16
+                with torch.no_grad():
+                    latents = self.policy.encode_frames(mb_frames)
+                
+                # Now compute log probs with mixed precision
+                log_probs = []
+                for t in range(T_prompt, T_prompt + T_gen):
+                    context = latents[:, :t].detach()  # Detach to save memory
+                    target = latents[:, t:t+1].detach()
+                    action_idx = t - T_prompt
+                    action = mb_actions[:, action_idx:action_idx+1]
+                    
+                    # Use mixed precision for log prob computation
+                    if self.config.use_mixed_precision and self.device == "cuda":
+                        with torch.cuda.amp.autocast():
+                            log_prob = self.policy.compute_log_prob(context, action, target)
+                    else:
+                        log_prob = self.policy.compute_log_prob(context, action, target)
+                    
+                    log_probs.append(log_prob)
+                    
+                    # Aggressive cleanup
+                    del context, target
+                
+                # Delete latents after use
+                del latents
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                log_probs = torch.stack(log_probs, dim=1)
+                
+                # Use verl's compute_policy_loss
+                pg_loss, pg_clipfrac, ppo_kl, _ = core_algos.compute_policy_loss(
+                    old_log_prob=mb_old_log_probs,
+                    log_prob=log_probs,
+                    advantages=mb_advantages,
+                    response_mask=mb_response_mask,
+                    cliprange=self.config.clip_ratio,
+                    loss_agg_mode="token-mean"
+                )
+                
+                # Entropy loss (simple proxy)
+                entropy_proxy = -log_probs.mean()
+                entropy_loss = -self.config.entropy_coeff * entropy_proxy
+                
+                total_loss = pg_loss + entropy_loss
+                
+                # Scale loss by number of micro-batches for gradient accumulation
+                total_loss = total_loss / num_micro_batches
+                
+                # Backward pass
+                if hasattr(self, 'grad_scaler') and self.grad_scaler is not None:
+                    self.grad_scaler.scale(total_loss).backward()
+                else:
+                    total_loss.backward()
+                
+                # Accumulate metrics
+                epoch_pg_loss += pg_loss.item()
+                epoch_pg_clipfrac += pg_clipfrac.item()
+                epoch_ppo_kl += ppo_kl.item()
+                
+                # Cleanup
+                del log_probs, pg_loss, entropy_loss, total_loss
+                del mb_frames, mb_actions, mb_old_log_probs, mb_advantages, mb_response_mask
+                
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            
+            # Optimization step (after accumulating gradients from all micro-batches)
+            if hasattr(self, 'grad_scaler') and self.grad_scaler is not None:
                 self.grad_scaler.unscale_(self.optimizer)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.get_trainable_parameters(),
@@ -608,7 +644,6 @@ class OasisGRPOTrainer:
                 self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
             else:
-                total_loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.get_trainable_parameters(),
                     self.config.grad_clip,
@@ -620,12 +655,13 @@ class OasisGRPOTrainer:
             if self.scheduler is not None:
                 self.scheduler.step()
             
-            metrics['pg_loss'].append(pg_loss.item())
-            metrics['total_loss'].append(total_loss.item())
+            # Average metrics over micro-batches
+            metrics['pg_loss'].append(epoch_pg_loss / num_micro_batches)
+            metrics['total_loss'].append(epoch_pg_loss / num_micro_batches)  # Simplified
             metrics['grad_norm'].append(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
-            metrics['clip_fraction'].append(pg_clipfrac.item())
-            metrics['kl'].append(ppo_kl.item())
-            
+            metrics['clip_fraction'].append(epoch_pg_clipfrac / num_micro_batches)
+            metrics['kl'].append(epoch_ppo_kl / num_micro_batches)
+        
         result = {k: np.mean(v) if v else float('nan') for k, v in metrics.items()}
         result['update_success_rate'] = successful_updates / self.config.grpo_epochs
         

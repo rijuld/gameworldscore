@@ -24,7 +24,8 @@ import torch
 import torch.nn as nn
 
 from .inverse_kinematics import InverseKinematicsReward
-from .temporal_consistency import TemporalConsistencyReward
+from .temporal_consistency import TemporalConsistencyRewardV2 as TemporalConsistencyReward
+from .temporal_consistency import load_temporal_consistency_reward_v2
 from .aesthetic_quality import AestheticQualityReward
 
 
@@ -96,8 +97,8 @@ class GameWorldScoreReward(nn.Module):
         )
         
         self.rtc = TemporalConsistencyReward(
-            clip_model_path=clip_model_path,  # Kept for compatibility, but RTC now uses RAFT
             device=device,
+            alpha=30.0, # Default alpha
         )
         
         # Note: RTC now uses RAFT optical flow instead of CLIP

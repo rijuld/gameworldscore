@@ -122,9 +122,9 @@ def parse_args():
         help="Micro-batch size for GRPO updates (increase for speed if VRAM allows)",
     )
     parser.add_argument(
-        "--no-compile",
+        "--compile",
         action="store_true",
-        help="Disable torch.compile (enabled by default)",
+        help="Enable torch.compile for DiT model (experimental)",
     )
     parser.add_argument(
         "--no-tf32",
@@ -412,7 +412,7 @@ def main():
         # Optimizations
         dataloader_num_workers=args.num_workers,
         update_micro_batch_size=args.micro_batch_size,
-        use_torch_compile=not args.no_compile,
+        use_torch_compile=args.compile,
         enable_tf32=not args.no_tf32,
         use_motion_smoothness=not args.no_motion_smoothness,
         offload_reward_to_cpu=args.offload_reward,

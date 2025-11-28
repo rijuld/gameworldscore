@@ -131,7 +131,7 @@ class OasisGRPOConfig:
     # Performance optimizations
     dataloader_num_workers: int = 4  # Number of workers for data loading
     update_micro_batch_size: int = 1  # Micro-batch size for GRPO updates
-    use_torch_compile: bool = True  # Enable torch.compile for potential speedup
+    use_torch_compile: bool = False  # Enable torch.compile for potential speedup
     enable_tf32: bool = True  # Enable TensorFloat-32 on Ampere+ GPUs
     
     # KL settings

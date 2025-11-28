@@ -124,7 +124,7 @@ class OasisGRPOConfig:
     use_mixed_precision: bool = True  # Enable mixed precision training (FP16)
     offload_reward_to_cpu: bool = True  # Offload reward models to CPU to save GPU memory
     offload_ref_policy_to_cpu: bool = True  # Offload reference policy to CPU (only load to GPU when needed)
-    cache_encoded_frames: bool = True  # Cache encoded frames to avoid redundant encoding (saves time)
+    cache_encoded_frames: bool = False  # DISABLED: Caching prevents gradient flow (causes clip=0)
     kl_compute_freq: int = 5  # Compute KL divergence every N steps (1 = every step)
     
     # KL settings
@@ -506,17 +506,28 @@ class OasisGRPOTrainer:
             response_mask = torch.ones_like(rewards)
             
         # Use verl's GRPO implementation
-        # Note: verl expects indices as numpy array or tensor? core_algos says numpy array or tensor depending on impl
-        # core_algos.compute_grpo_outcome_advantage uses id2score[index[i]], so index needs to be iterable/hashable
-        
         # Convert indices to numpy for verl
         indices_np = indices.cpu().numpy()
+        
+        # Debug logging
+        if self.global_step % 10 == 0:
+            print(f"\n  [DEBUG] Advantage Computation:")
+            print(f"    Rewards shape: {rewards.shape}")
+            print(f"    Rewards range: [{rewards.min():.4f}, {rewards.max():.4f}]")
+            print(f"    Scaled rewards range: [{scaled_rewards.min():.4f}, {scaled_rewards.max():.4f}]")
+            print(f"    Indices: {indices_np}")
+            print(f"    Unique indices: {np.unique(indices_np)}")
         
         advantages, _ = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=scaled_rewards,
             response_mask=response_mask,
             index=indices_np,
         )
+        
+        # Debug logging
+        if self.global_step % 10 == 0:
+            print(f"    Advantages range: [{advantages.min():.4f}, {advantages.max():.4f}]")
+            print(f"    Advantages mean: {advantages.mean():.4f}, std: {advantages.std():.4f}")
         
         info = {
             'advantage_mean': advantages.mean().item(),
@@ -544,12 +555,13 @@ class OasisGRPOTrainer:
         T_prompt = self.config.n_prompt_frames
         T_gen = all_frames.shape[1] - T_prompt
         
-        # OPTIMIZATION: Encode frames ONCE and cache for all epochs
-        # This avoids redundant encoding (2x speedup)
+        # OPTIMIZATION: Encode frames ONCE for reference (speeds up reading)
+        # BUT: We must re-encode during update to allow gradients to flow!
+        # The VAE is frozen, but we need gradients through the DiT
         if self.config.cache_encoded_frames:
             with torch.no_grad():
-                cached_latents = self.policy.encode_frames(all_frames)
-                cached_latents = cached_latents.detach()  # Detach to save memory
+                cached_latents_for_reference = self.policy.encode_frames(all_frames)
+                cached_latents_for_reference = cached_latents_for_reference.detach()
         
         # CRITICAL: Process in micro-batches if batch size > 1
         micro_batch_size = 1  # Process one sample at a time
@@ -586,13 +598,10 @@ class OasisGRPOTrainer:
                 mb_advantages = advantages[start_idx:end_idx]
                 mb_response_mask = response_mask[start_idx:end_idx]
                 
-                # Use cached latents if available, otherwise encode
-                if self.config.cache_encoded_frames:
-                    latents = cached_latents[start_idx:end_idx]
-                else:
-                    # Encode frames (slower path)
-                    with torch.no_grad():
-                        latents = self.policy.encode_frames(mb_frames)
+                # CRITICAL FIX: Always re-encode to allow gradients to flow
+                # The VAE encoder is frozen, but gradients need to flow through DiT
+                # We encode WITHOUT no_grad() so gradients can backprop
+                latents = self.policy.encode_frames(mb_frames)
                 
                 # Compute log probs with mixed precision
                 log_probs = []
@@ -691,9 +700,9 @@ class OasisGRPOTrainer:
             metrics['clip_fraction'].append(epoch_pg_clipfrac / num_micro_batches)
             metrics['kl'].append(epoch_ppo_kl / num_micro_batches)
         
-        # Clear cached latents to free memory
+        # Clear cached latents to free memory (if they were created)
         if self.config.cache_encoded_frames:
-            del cached_latents
+            del cached_latents_for_reference
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
@@ -789,6 +798,30 @@ class OasisGRPOTrainer:
         print(f"  Step {self.global_step}: R={metrics['reward/mean']:.3f}, "
               f"L={metrics['train/total_loss']:.4f}, "
               f"Clip={metrics['train/clip_fraction']:.2f}")
+        
+        # Detailed logging every 10 steps
+        if self.global_step % 10 == 0:
+            print(f"\n  === Detailed Metrics (Step {self.global_step}) ===")
+            print(f"  Rewards: mean={reward_mean:.4f}, std={reward_std:.4f}")
+            print(f"  Advantages: mean={adv_info.get('advantage_mean', 0):.4f}, "
+                  f"std={adv_info.get('advantage_std', 0):.4f}")
+            print(f"  Policy Loss: {metrics['train/pg_loss']:.4f}")
+            print(f"  Total Loss: {metrics['train/total_loss']:.4f}")
+            print(f"  Grad Norm: {metrics['train/grad_norm']:.4f}")
+            print(f"  Clip Fraction: {metrics['train/clip_fraction']:.4f}")
+            print(f"  KL Divergence: {metrics['train/kl']:.4f}")
+            print(f"  Learning Rate: {metrics['train/learning_rate']:.2e}")
+            
+            # Reward breakdown if available
+            if 'reward/rik' in metrics:
+                print(f"  Reward Components:")
+                print(f"    RIK: {metrics.get('reward/rik', 0):.4f}")
+                print(f"    RTC: {metrics.get('reward/rtc', 0):.4f}")
+                print(f"    RAQ: {metrics.get('reward/raq', 0):.4f}")
+            
+            print(f"  Timing: gen={gen_time:.2f}s, reward={reward_time:.2f}s, "
+                  f"update={grpo_time:.2f}s")
+            print(f"  =====================================\n")
         
         return metrics
     

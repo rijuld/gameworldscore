@@ -122,10 +122,17 @@ class OasisGRPOConfig:
     # Memory optimization settings
     use_gradient_checkpointing: bool = True  # Enable gradient checkpointing to save memory
     use_mixed_precision: bool = True  # Enable mixed precision training (FP16)
-    offload_reward_to_cpu: bool = True  # Offload reward models to CPU to save GPU memory
-    offload_ref_policy_to_cpu: bool = True  # Offload reference policy to CPU (only load to GPU when needed)
+    use_mixed_precision: bool = True  # Enable mixed precision training (FP16)
+    offload_reward_to_cpu: bool = False  # Offload reward models to CPU to save GPU memory
+    offload_ref_policy_to_cpu: bool = False  # Offload reference policy to CPU (only load to GPU when needed)
     cache_encoded_frames: bool = False  # DISABLED: Caching prevents gradient flow (causes clip=0)
     kl_compute_freq: int = 5  # Compute KL divergence every N steps (1 = every step)
+    
+    # Performance optimizations
+    dataloader_num_workers: int = 4  # Number of workers for data loading
+    update_micro_batch_size: int = 1  # Micro-batch size for GRPO updates
+    use_torch_compile: bool = True  # Enable torch.compile for potential speedup
+    enable_tf32: bool = True  # Enable TensorFloat-32 on Ampere+ GPUs
     
     # KL settings
     use_kl_in_reward: bool = True  # Enable KL divergence penalty (ref policy on CPU to save memory)
@@ -137,6 +144,7 @@ class OasisGRPOConfig:
     rtc_weight: float = 1.0
     raq_weight: float = 1.0
     require_vpt: bool = True
+    use_motion_smoothness: bool = True
     
     # Advantage estimation
     adv_estimator: str = "grpo"  # "grpo" (recommended)
@@ -180,6 +188,12 @@ class OasisGRPOTrainer:
         self.device = config.device
         self.global_step = 0
         
+        # Enable TF32 for faster matrix multiplications on Ampere+ GPUs
+        if config.enable_tf32 and torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            print("  Enabled TensorFloat-32 (TF32) for faster training")
+        
         # Initialize components
         self._init_policy()
         self._init_reward()
@@ -212,17 +226,17 @@ class OasisGRPOTrainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        # Disable torch.compile for DiT model due to compatibility issues
-        # The DiT model has complex tensor operations that don't compile well
-        # Uncomment below to enable compilation (may cause errors):
-        # try:
-        #     if hasattr(torch, 'compile'):
-        #         print("  Compiling policy model for faster inference...")
-        #         self.policy.dit = torch.compile(self.policy.dit, mode='reduce-overhead')
-        #         print("  ✓ Model compiled successfully")
-        # except Exception as e:
-        #     print(f"  ⚠️  Model compilation failed (using uncompiled): {e}")
-        print("  Using uncompiled DiT model (torch.compile disabled due to compatibility issues)")
+        # Compile DiT model if requested
+        if self.config.use_torch_compile:
+            try:
+                if hasattr(torch, 'compile'):
+                    print("  Compiling policy model for faster inference...")
+                    self.policy.dit = torch.compile(self.policy.dit, mode='reduce-overhead')
+                    print("  ✓ Model compiled successfully")
+            except Exception as e:
+                print(f"  ⚠️  Model compilation failed (using uncompiled): {e}")
+        else:
+            print("  Using uncompiled DiT model (torch.compile disabled)")
         
         # Enable gradient checkpointing only during training (not inference)
         # We'll toggle this in train_step
@@ -276,6 +290,7 @@ class OasisGRPOTrainer:
             rtc_weight=self.config.rtc_weight,
             raq_weight=self.config.raq_weight,
             require_vpt=self.config.require_vpt,
+            use_motion_smoothness=self.config.use_motion_smoothness,
         )
         
         # Disable torch.compile for reward models due to potential compatibility issues
@@ -323,6 +338,7 @@ class OasisGRPOTrainer:
                 dataset_type=self.config.dataset_type,
                 frame_size=self.config.frame_size,
                 split="train",
+                num_workers=self.config.dataloader_num_workers,
             )
         else:
             print(f"Warning: Data directory {data_dir} not found.")
@@ -700,8 +716,8 @@ class OasisGRPOTrainer:
                 cached_latents_for_reference = cached_latents_for_reference.detach()
         
         # CRITICAL: Process in micro-batches if batch size > 1
-        micro_batch_size = 1  # Process one sample at a time
-        num_micro_batches = max(1, B // micro_batch_size)
+        micro_batch_size = self.config.update_micro_batch_size
+        num_micro_batches = max(1, (B + micro_batch_size - 1) // micro_batch_size)
         
         metrics = defaultdict(list)
         successful_updates = 0

@@ -292,6 +292,7 @@ def create_game_world_score_reward(
     rtc_weight: float = 1.0,
     raq_weight: float = 1.0,
     require_vpt: bool = True,
+    use_motion_smoothness: bool = False,
 ) -> GameWorldScoreReward:
     """
     Create GameWorldScore reward with models from the specified directory.
@@ -341,5 +342,6 @@ def create_game_world_score_reward(
         raq_weight=raq_weight,
         device=device,
         require_vpt=require_vpt,
+        use_motion_smoothness=use_motion_smoothness,
     )
 

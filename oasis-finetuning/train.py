@@ -108,6 +108,45 @@ def parse_args():
         help="Maximum frames to generate per rollout (reduced to prevent OOM)",
     )
     
+    # Performance optimizations
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of dataloader workers",
+    )
+    parser.add_argument(
+        "--micro-batch-size",
+        type=int,
+        default=1,
+        help="Micro-batch size for GRPO updates (increase for speed if VRAM allows)",
+    )
+    parser.add_argument(
+        "--no-compile",
+        action="store_true",
+        help="Disable torch.compile (enabled by default)",
+    )
+    parser.add_argument(
+        "--no-tf32",
+        action="store_true",
+        help="Disable TensorFloat-32 (TF32) on Ampere+ GPUs",
+    )
+    parser.add_argument(
+        "--no-motion-smoothness",
+        action="store_true",
+        help="Disable motion smoothness reward (enabled by default)",
+    )
+    parser.add_argument(
+        "--offload-reward",
+        action="store_true",
+        help="Offload reward models to CPU (disabled by default for speed)",
+    )
+    parser.add_argument(
+        "--offload-ref",
+        action="store_true",
+        help="Offload reference policy to CPU (disabled by default for speed)",
+    )
+    
     # Training
     parser.add_argument(
         "--total-steps",
@@ -191,10 +230,9 @@ def parse_args():
     
     # KL regularization
     parser.add_argument(
-        "--use-kl",
+        "--no-kl",
         action="store_true",
-        default=False,
-        help="Use KL penalty in reward (requires loading reference model - more memory)",
+        help="Disable KL penalty in reward (saves memory)",
     )
     parser.add_argument(
         "--kl-coeff",
@@ -360,7 +398,7 @@ def main():
         rtc_weight=args.rtc_weight,
         raq_weight=args.raq_weight,
         require_vpt=args.require_vpt and not args.no_require_vpt,
-        use_kl_in_reward=args.use_kl and not args.no_wandb,
+        use_kl_in_reward=not args.no_kl,
         kl_coeff=args.kl_coeff,
         adv_estimator=args.adv_estimator,
         save_freq=args.save_freq,
@@ -371,6 +409,14 @@ def main():
         experiment_name=args.experiment_name,
         use_wandb=args.use_wandb and not args.no_wandb,
         device=args.device,
+        # Optimizations
+        dataloader_num_workers=args.num_workers,
+        update_micro_batch_size=args.micro_batch_size,
+        use_torch_compile=not args.no_compile,
+        enable_tf32=not args.no_tf32,
+        use_motion_smoothness=not args.no_motion_smoothness,
+        offload_reward_to_cpu=args.offload_reward,
+        offload_ref_policy_to_cpu=args.offload_ref,
     )
     
     # Create trainer

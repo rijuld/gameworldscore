@@ -23,7 +23,7 @@ reward:
   raq_weight: 1.0  # Aesthetic Quality (LAION aesthetic predictor)
   reward_scale: 1.0  # Scale factor for reward values
   normalize_weights: true
-  use_motion_smoothness: false
+  use_motion_smoothness: true
 
 # Data configuration
 data:
@@ -65,7 +65,7 @@ advantage:
   
 # KL regularization
 kl:
-  use_kl_in_reward: false  # Disabled by default to save memory
+  use_kl_in_reward: true  # Enabled by default (disable with --no-kl to save memory)
   kl_coeff: 0.01
   kl_target: 0.1
   adaptive_kl: true

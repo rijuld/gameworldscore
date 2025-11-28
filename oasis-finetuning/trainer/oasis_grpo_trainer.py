@@ -212,14 +212,17 @@ class OasisGRPOTrainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        # Compile model for faster inference (PyTorch 2.0+)
-        try:
-            if hasattr(torch, 'compile'):
-                print("  Compiling policy model for faster inference...")
-                self.policy.dit = torch.compile(self.policy.dit, mode='reduce-overhead')
-                print("  ✓ Model compiled successfully")
-        except Exception as e:
-            print(f"  ⚠️  Model compilation failed (using uncompiled): {e}")
+        # Disable torch.compile for DiT model due to compatibility issues
+        # The DiT model has complex tensor operations that don't compile well
+        # Uncomment below to enable compilation (may cause errors):
+        # try:
+        #     if hasattr(torch, 'compile'):
+        #         print("  Compiling policy model for faster inference...")
+        #         self.policy.dit = torch.compile(self.policy.dit, mode='reduce-overhead')
+        #         print("  ✓ Model compiled successfully")
+        # except Exception as e:
+        #     print(f"  ⚠️  Model compilation failed (using uncompiled): {e}")
+        print("  Using uncompiled DiT model (torch.compile disabled due to compatibility issues)")
         
         # Enable gradient checkpointing only during training (not inference)
         # We'll toggle this in train_step
@@ -275,22 +278,25 @@ class OasisGRPOTrainer:
             require_vpt=self.config.require_vpt,
         )
         
-        # Compile reward models for faster inference (if on GPU)
+        # Disable torch.compile for reward models due to potential compatibility issues
+        # Uncomment below to enable compilation (may cause errors):
+        # if reward_device == "cuda":
+        #     try:
+        #         if hasattr(torch, 'compile'):
+        #             print("  Compiling reward models for faster inference...")
+        #             if hasattr(self.reward_fn.rtc, 'clip_model'):
+        #                 self.reward_fn.rtc.clip_model = torch.compile(
+        #                     self.reward_fn.rtc.clip_model, mode='reduce-overhead'
+        #                 )
+        #             if hasattr(self.reward_fn.raq, 'aesthetic_predictor'):
+        #                 self.reward_fn.raq.aesthetic_predictor = torch.compile(
+        #                     self.reward_fn.raq.aesthetic_predictor, mode='reduce-overhead'
+        #                 )
+        #             print("  ✓ Reward models compiled successfully")
+        #     except Exception as e:
+        #         print(f"  ⚠️  Reward model compilation failed (using uncompiled): {e}")
         if reward_device == "cuda":
-            try:
-                if hasattr(torch, 'compile'):
-                    print("  Compiling reward models for faster inference...")
-                    if hasattr(self.reward_fn.rtc, 'clip_model'):
-                        self.reward_fn.rtc.clip_model = torch.compile(
-                            self.reward_fn.rtc.clip_model, mode='reduce-overhead'
-                        )
-                    if hasattr(self.reward_fn.raq, 'aesthetic_predictor'):
-                        self.reward_fn.raq.aesthetic_predictor = torch.compile(
-                            self.reward_fn.raq.aesthetic_predictor, mode='reduce-overhead'
-                        )
-                    print("  ✓ Reward models compiled successfully")
-            except Exception as e:
-                print(f"  ⚠️  Reward model compilation failed (using uncompiled): {e}")
+            print("  Using uncompiled reward models (torch.compile disabled for stability)")
         
         # Clear cache after loading reward models
         if torch.cuda.is_available():

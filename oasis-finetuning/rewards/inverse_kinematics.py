@@ -237,6 +237,46 @@ class InverseKinematicsReward(nn.Module):
         super().__init__()
         self.device = device
         self.action_dim = action_dim
+        # Resolve default paths relative to project root
+        project_root = Path(__file__).parent.parent
+        
+        if idm_model_path is None:
+            idm_model_path = str(project_root / self.DEFAULT_MODEL_PATH)
+        if idm_weights_path is None:
+            idm_weights_path = str(project_root / self.DEFAULT_WEIGHTS_PATH)
+        
+        # Check if VPT IDM files exist
+        model_exists = os.path.exists(idm_model_path)
+        weights_exists = os.path.exists(idm_weights_path)
+        
+        if not model_exists or not weights_exists:
+            print("  ⚠️  VPT IDM not found!")
+            print(f"      Model path: {idm_model_path} ({'exists' if model_exists else 'MISSING'})")
+            print(f"      Weights path: {idm_weights_path} ({'exists' if weights_exists else 'MISSING'})")
+            print()
+            print("  To download VPT IDM, run:")
+            print("      python download_reward_models.py")
+            print()
+            raise FileNotFoundError(
+                f"VPT IDM files not found. Run 'python download_vpt_idm.py' to download them."
+            )
+        
+        # Load VPT IDM
+        self.vpt_idm = VPTIDMWrapper(
+            model_path=idm_model_path,
+            weights_path=idm_weights_path,
+            device=device,
+        )
+        
+        if not self.vpt_idm.is_available:
+            raise RuntimeError(
+                "Failed to load VPT IDM. Check that VPT repo is cloned and dependencies installed.\n"
+                "  Option 1: Clone VPT repo to project root:\n"
+                "      git clone https://github.com/openai/Video-Pre-Training.git VPT\n"
+                "  Option 2: Set VPT_PATH environment variable:\n"
+                "      export VPT_PATH=/path/to/VPT"
+            )
+        
         self.use_vpt = True
         print("  ✓ VPT IDM loaded successfully for RIK reward")
 

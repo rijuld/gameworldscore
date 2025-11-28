@@ -24,14 +24,21 @@ import numpy as np
 from tqdm import tqdm
 
 # Add RLVR-World to path for GRPO utilities
-# Robust path resolution: try relative first, then absolute fallback
+# Robust path resolution:
+# 1. Check RLVR_WORLD_PATH environment variable
+# 2. Check relative path from project root
+# 3. Fail with helpful error message
+
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent.parent
-RLVR_PATH = project_root / "RLVR-World" / "vid_wm" / "verl"
 
-if not RLVR_PATH.exists():
-    # Fallback to absolute path if relative fails (e.g. symlinks)
-    RLVR_PATH = Path("/Users/carrotcake/Projects/NYU/RLFS/RLVR-World/vid_wm/verl")
+# 1. Environment variable
+env_path = os.environ.get("RLVR_WORLD_PATH")
+if env_path:
+    RLVR_PATH = Path(env_path)
+else:
+    # 2. Relative path
+    RLVR_PATH = project_root / "RLVR-World" / "vid_wm" / "verl"
 
 if str(RLVR_PATH) not in sys.path:
     sys.path.insert(0, str(RLVR_PATH))
@@ -42,7 +49,9 @@ try:
     from verl.utils.torch_functional import masked_mean
     RLVR_AVAILABLE = True
 except ImportError as e:
-    print(f"Warning: RLVR-World not found at {RLVR_PATH}. GRPO will not work correctly. Error: {e}")
+    print(f"Warning: RLVR-World not found at {RLVR_PATH}. GRPO will not work correctly.")
+    print(f"  Error: {e}")
+    print("  Please ensure RLVR-World submodule is initialized or set RLVR_WORLD_PATH env var.")
     RLVR_AVAILABLE = False
     DataProto = None
 

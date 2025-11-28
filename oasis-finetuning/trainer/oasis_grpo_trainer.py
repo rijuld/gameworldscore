@@ -714,7 +714,7 @@ class OasisGRPOTrainer:
                     
                     # Use mixed precision for log prob computation
                     if self.config.use_mixed_precision and self.device == "cuda":
-                        with torch.cuda.amp.autocast():
+                        with torch.amp.autocast('cuda'):
                             log_prob = self.policy.compute_log_prob(context, action, target)
                     else:
                         log_prob = self.policy.compute_log_prob(context, action, target)
@@ -1009,7 +1009,9 @@ class OasisGRPOTrainer:
                 remaining_str = "??:??:??"
             
             # Get rate
-            rate = fmt_dict.get('rate', elapsed / n if n > 0 and elapsed > 0 else 0)
+            rate = fmt_dict.get('rate')
+            if rate is None or rate <= 0:
+                rate = elapsed / n if n > 0 and elapsed > 0 else 0
             rate_str = f"{rate:.2f}s/it" if rate > 0 else "?s/it"
             
             progress_info = f"{n}/{total} [{elapsed_str}<{remaining_str}, {rate_str}]"

@@ -98,12 +98,12 @@ class OasisGRPOConfig:
     total_epochs: int = 10
     total_training_steps: int = 10000
     train_batch_size: int = 1  # Number of unique prompts per step
-    group_size: int = 4  # Number of rollouts per prompt (GRPO group size)
-    grpo_epochs: int = 4  # Number of update epochs per step
+    group_size: int = 4  # Number of rollouts per prompt (GRPO group size) - reduced for memory
+    grpo_epochs: int = 2  # Number of update epochs per step - reduced for memory
     
     # Rollout settings
     n_prompt_frames: int = 1
-    max_gen_frames: int = 4
+    max_gen_frames: int = 4  # Reduced from 4 to 2 for memory optimization
     
     # GRPO hyperparameters (following RLVR-World)
     learning_rate: float = 5e-7
@@ -114,6 +114,10 @@ class OasisGRPOConfig:
     entropy_coeff: float = 0.001
     grad_clip: float = 1.0
     reward_scale: float = 1.0
+    
+    # Memory optimization settings
+    use_gradient_checkpointing: bool = True  # Enable gradient checkpointing to save memory
+    use_mixed_precision: bool = True  # Enable mixed precision training (FP16)
     
     # KL settings
     use_kl_in_reward: bool = False
@@ -185,6 +189,15 @@ class OasisGRPOTrainer:
             device=self.config.device,
         )
         
+        # Enable gradient checkpointing if requested
+        if self.config.use_gradient_checkpointing:
+            if hasattr(self.policy.dit, 'enable_gradient_checkpointing'):
+                self.policy.dit.enable_gradient_checkpointing()
+                print("  Gradient checkpointing enabled")
+            elif hasattr(self.policy.dit, 'gradient_checkpointing_enable'):
+                self.policy.dit.gradient_checkpointing_enable()
+                print("  Gradient checkpointing enabled")
+        
         # Reference policy for KL computation (frozen)
         if self.config.use_kl_in_reward:
             self.ref_policy = OasisPolicy(
@@ -243,8 +256,12 @@ class OasisGRPOTrainer:
             weight_decay=0.01,
         )
         
-        if self.device == "cuda":
+        # Initialize gradient scaler for mixed precision training
+        if self.device == "cuda" and self.config.use_mixed_precision:
             self.grad_scaler = torch.cuda.amp.GradScaler()
+            print("  Mixed precision training enabled (FP16)")
+        else:
+            self.grad_scaler = None
         
         if self.config.total_training_steps > 0:
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -432,20 +449,38 @@ class OasisGRPOTrainer:
             response_mask = torch.ones_like(old_log_probs)
         
         for epoch in range(self.config.grpo_epochs):
-            # Compute current log probs
-            latents = self.policy.encode_frames(all_frames)
-            
-            log_probs = []
-            for t in range(T_prompt, T_prompt + T_gen):
-                context = latents[:, :t]
-                target = latents[:, t:t+1]
-                action_idx = t - T_prompt
-                action = actions[:, action_idx:action_idx+1]
+            # Use mixed precision if enabled
+            if self.config.use_mixed_precision and self.device == "cuda":
+                with torch.cuda.amp.autocast():
+                    # Compute current log probs
+                    latents = self.policy.encode_frames(all_frames)
+                    
+                    log_probs = []
+                    for t in range(T_prompt, T_prompt + T_gen):
+                        context = latents[:, :t]
+                        target = latents[:, t:t+1]
+                        action_idx = t - T_prompt
+                        action = actions[:, action_idx:action_idx+1]
+                        
+                        log_prob = self.policy.compute_log_prob(context, action, target)
+                        log_probs.append(log_prob)
+                    
+                    log_probs = torch.stack(log_probs, dim=1)
+            else:
+                # Compute current log probs
+                latents = self.policy.encode_frames(all_frames)
                 
-                log_prob = self.policy.compute_log_prob(context, action, target)
-                log_probs.append(log_prob)
-            
-            log_probs = torch.stack(log_probs, dim=1)
+                log_probs = []
+                for t in range(T_prompt, T_prompt + T_gen):
+                    context = latents[:, :t]
+                    target = latents[:, t:t+1]
+                    action_idx = t - T_prompt
+                    action = actions[:, action_idx:action_idx+1]
+                    
+                    log_prob = self.policy.compute_log_prob(context, action, target)
+                    log_probs.append(log_prob)
+                
+                log_probs = torch.stack(log_probs, dim=1)
             
             # Use verl's compute_policy_loss
             pg_loss, pg_clipfrac, ppo_kl, _ = core_algos.compute_policy_loss(
@@ -507,8 +542,10 @@ class OasisGRPOTrainer:
         """Execute a single training step."""
         import time
         
+        # Aggressive memory cleanup
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         
         # Prepare inputs
         if 'initial_frame' in batch:

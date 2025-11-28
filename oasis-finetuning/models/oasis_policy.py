@@ -187,16 +187,20 @@ class OasisPolicy(nn.Module):
         # DDIM denoising loop
         for noise_idx in reversed(range(1, self.ddim_steps + 1)):
             # Set up noise timesteps
+            # Explicitly cast to int for torch.full to avoid device mismatch issues in graph capture
+            t_val = int(self.noise_range[noise_idx].item())
+            t_prev_val = int(self.noise_range[noise_idx - 1].item())
+            
             t_ctx = torch.full(
                 (B, T), self.stabilization_level - 1,
                 dtype=torch.long, device=self.device
             )
             t = torch.full(
-                (B, 1), self.noise_range[noise_idx].long(),
+                (B, 1), t_val,
                 dtype=torch.long, device=self.device
             )
             t_next = torch.full(
-                (B, 1), self.noise_range[noise_idx - 1].long(),
+                (B, 1), t_prev_val,
                 dtype=torch.long, device=self.device
             )
             t_next = torch.where(t_next < 0, t, t_next)
@@ -336,6 +340,15 @@ class OasisPolicy(nn.Module):
         
         # Use float32 for all critical computations to maintain precision
         target_latents_f32 = target_latents.float()
+        
+        # Ensure timesteps is long for indexing
+        timesteps = timesteps.long()
+        
+        # Gather alpha values
+        # Use gather or direct indexing, but ensure shapes match
+        # self.alphas_cumprod is (T, 1, 1, 1, 1)
+        # timesteps is (B,)
+        # We want (B, 1, 1, 1, 1)
         alpha = self.alphas_cumprod[timesteps].view(B, 1, 1, 1, 1).float()
         
         # Compute noisy target with full precision

@@ -10,8 +10,11 @@ model:
 # Reward model paths
 reward:
   models_dir: "models_for_rl_finetuning"
+  # VPT IDM paths (download with: python download_reward_models.py)
+  idm_model_path: "models_for_rl_finetuning/4x_idm.model"
+  idm_weights_path: "models_for_rl_finetuning/4x_idm.weights"
   # GameWorldScore component weights (all normalized to [0, 1])
-  rik_weight: 1.0  # Inverse Kinematics (action fidelity) - uses VPT IDM if available
+  rik_weight: 1.0  # Inverse Kinematics (action fidelity) - requires VPT IDM
   rtc_weight: 1.0  # Temporal Consistency (CLIP similarity)
   raq_weight: 1.0  # Aesthetic Quality (LAION aesthetic predictor)
   normalize_weights: true
@@ -41,7 +44,7 @@ training:
   ppo_mini_batch_size: 4
   learning_rate: 1.0e-5
   weight_decay: 0.01
-  grad_clip: 1.0
+  grad_clip: 0.5  # Reduced to prevent gradient explosion
   
 # PPO hyperparameters
 ppo:

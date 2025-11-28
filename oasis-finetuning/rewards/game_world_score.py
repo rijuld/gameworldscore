@@ -349,11 +349,11 @@ def create_game_world_score_reward(
     if not os.path.exists(aesthetic_path):
         aesthetic_path = None
     
+    # VPT IDM (downloaded by download_reward_models.py)
     idm_model_path = os.path.join(models_dir, "4x_idm.model")
     idm_weights_path = os.path.join(models_dir, "4x_idm.weights")
-    if not os.path.exists(idm_model_path):
-        idm_model_path = None
-        idm_weights_path = None
+    
+    # If not found, InverseKinematicsReward will raise an error with download instructions
     
     return GameWorldScoreReward(
         idm_model_path=idm_model_path,

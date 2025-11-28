@@ -76,7 +76,7 @@ class OasisPPOConfig:
     lam: float = 0.95
     clip_ratio: float = 0.2
     entropy_coeff: float = 0.01
-    grad_clip: float = 1.0
+    grad_clip: float = 0.5  # Reduced to prevent gradient explosion
     
     # KL settings
     use_kl_in_reward: bool = False
@@ -84,7 +84,7 @@ class OasisPPOConfig:
     kl_target: float = 0.1
     
     # Reward weights (GameWorldScore)
-    rik_weight: float = 1.0
+    rik_weight: float = 1.0  # Requires VPT IDM (python download_vpt_idm.py)
     rtc_weight: float = 1.0
     raq_weight: float = 1.0
     

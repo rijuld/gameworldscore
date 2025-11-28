@@ -182,14 +182,17 @@ class InverseKinematicsReward(nn.Module):
     """
     Computes the Inverse Kinematics Score (RIK) reward.
     
-    Uses either:
-    1. VPT IDM (if available) - trained on millions of Minecraft frames
-    2. SimpleIDM (fallback) - random untrained CNN
+    Requires VPT IDM (OpenAI's Video Pre-Training Inverse Dynamics Model).
+    Download with: python download_vpt_idm.py
     
     The reward is normalized to [0, 1]:
     - 1 = perfect action prediction
     - 0 = completely wrong prediction
     """
+    
+    # Default paths for VPT IDM (downloaded by download_reward_models.py)
+    DEFAULT_MODEL_PATH = "models_for_rl_finetuning/4x_idm.model"
+    DEFAULT_WEIGHTS_PATH = "models_for_rl_finetuning/4x_idm.weights"
     
     def __init__(
         self,
@@ -203,22 +206,48 @@ class InverseKinematicsReward(nn.Module):
         self.action_dim = action_dim
         self.use_vpt = False
         
-        # Try to load VPT IDM first
-        if idm_model_path is not None and idm_weights_path is not None:
-            if os.path.exists(idm_model_path) and os.path.exists(idm_weights_path):
-                self.vpt_idm = VPTIDMWrapper(
-                    model_path=idm_model_path,
-                    weights_path=idm_weights_path,
-                    device=device,
-                )
-                self.use_vpt = self.vpt_idm.is_available
+        # Resolve default paths relative to project root
+        project_root = Path(__file__).parent.parent
         
-        # Fallback to SimpleIDM
-        if not self.use_vpt:
-            print("  Using SimpleIDM (fallback)")
-            self.simple_idm = SimpleIDM(num_actions=action_dim).to(device).eval()
-            for param in self.simple_idm.parameters():
-                param.requires_grad = False
+        if idm_model_path is None:
+            idm_model_path = str(project_root / self.DEFAULT_MODEL_PATH)
+        if idm_weights_path is None:
+            idm_weights_path = str(project_root / self.DEFAULT_WEIGHTS_PATH)
+        
+        # Check if VPT IDM files exist
+        model_exists = os.path.exists(idm_model_path)
+        weights_exists = os.path.exists(idm_weights_path)
+        
+        if not model_exists or not weights_exists:
+            print("  ⚠️  VPT IDM not found!")
+            print(f"      Model path: {idm_model_path} ({'exists' if model_exists else 'MISSING'})")
+            print(f"      Weights path: {idm_weights_path} ({'exists' if weights_exists else 'MISSING'})")
+            print()
+            print("  To download VPT IDM, run:")
+            print("      python download_reward_models.py")
+            print()
+            print("  Or download manually from OpenAI:")
+            print("      https://openaipublic.blob.core.windows.net/minecraft-rl/idm/4x_idm.model")
+            print("      https://openaipublic.blob.core.windows.net/minecraft-rl/idm/4x_idm.weights")
+            print()
+            raise FileNotFoundError(
+                f"VPT IDM files not found. Run 'python download_vpt_idm.py' to download them."
+            )
+        
+        # Load VPT IDM
+        self.vpt_idm = VPTIDMWrapper(
+            model_path=idm_model_path,
+            weights_path=idm_weights_path,
+            device=device,
+        )
+        
+        if not self.vpt_idm.is_available:
+            raise RuntimeError(
+                "Failed to load VPT IDM. Check that VPT repo is cloned and dependencies installed."
+            )
+        
+        self.use_vpt = True
+        print("  ✓ VPT IDM loaded successfully for RIK reward")
     
     @torch.no_grad()
     def compute_reward(
@@ -239,12 +268,7 @@ class InverseKinematicsReward(nn.Module):
             reward: (B,) RIK reward in [0, 1]
             info: Dict with additional metrics
         """
-        B = frame_t.shape[0]
-        
-        if self.use_vpt:
-            return self._compute_vpt_reward(frame_t, frame_t1, intended_action)
-        else:
-            return self._compute_simple_reward(frame_t, frame_t1, intended_action)
+        return self._compute_vpt_reward(frame_t, frame_t1, intended_action)
     
     def _compute_vpt_reward(
         self,

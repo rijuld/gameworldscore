@@ -24,7 +24,15 @@ import numpy as np
 from tqdm import tqdm
 
 # Add RLVR-World to path for GRPO utilities
-RLVR_PATH = Path(__file__).parent.parent.parent / "RLVR-World" / "vid_wm" / "verl"
+# Robust path resolution: try relative first, then absolute fallback
+current_file = Path(__file__).resolve()
+project_root = current_file.parent.parent.parent
+RLVR_PATH = project_root / "RLVR-World" / "vid_wm" / "verl"
+
+if not RLVR_PATH.exists():
+    # Fallback to absolute path if relative fails (e.g. symlinks)
+    RLVR_PATH = Path("/Users/carrotcake/Projects/NYU/RLFS/RLVR-World/vid_wm/verl")
+
 if str(RLVR_PATH) not in sys.path:
     sys.path.insert(0, str(RLVR_PATH))
 
@@ -33,8 +41,8 @@ try:
     from verl.trainer.ppo import core_algos
     from verl.utils.torch_functional import masked_mean
     RLVR_AVAILABLE = True
-except ImportError:
-    print("Warning: RLVR-World not found. GRPO will not work correctly.")
+except ImportError as e:
+    print(f"Warning: RLVR-World not found at {RLVR_PATH}. GRPO will not work correctly. Error: {e}")
     RLVR_AVAILABLE = False
     DataProto = None
 
@@ -79,6 +87,7 @@ class OasisGRPOConfig:
     gamma: float = 0.99
     lam: float = 0.95
     clip_ratio: float = 0.2
+    log_ratio_clip: float = 2.0  # Added back for compatibility
     entropy_coeff: float = 0.001
     grad_clip: float = 1.0
     reward_scale: float = 1.0

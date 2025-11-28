@@ -106,7 +106,7 @@ class TemporalConsistencyRewardV2(nn.Module):
         tv_weight: float = 0.02,
         fb_weight: float = 1.0,
         multiscale: List[float] = [1.0, 0.5, 0.25],
-        normalize_rewards: bool = True,
+        normalize_rewards: bool = False,
     ) -> None:
         super().__init__()
         self.device = torch.device(device)

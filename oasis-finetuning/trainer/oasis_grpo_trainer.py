@@ -706,13 +706,13 @@ class OasisGRPOTrainer:
         T_prompt = self.config.n_prompt_frames
         T_gen = all_frames.shape[1] - T_prompt
         
-        # OPTIMIZATION: Encode frames ONCE for reference (speeds up reading)
-        # BUT: We must re-encode during update to allow gradients to flow!
-        # The VAE is frozen, but we need gradients through the DiT
-        if self.config.cache_encoded_frames:
-            with torch.no_grad():
-                cached_latents_for_reference = self.policy.encode_frames(all_frames)
-                cached_latents_for_reference = cached_latents_for_reference.detach()
+        # OPTIMIZATION: Encode frames ONCE.
+        # Since VAE is frozen, we don't need to backprop through it.
+        # We just need the latents as input to the DiT.
+        with torch.no_grad():
+            all_latents = self.policy.encode_frames(all_frames)
+            if all_latents.device != self.device:
+                all_latents = all_latents.to(self.device)
         
         # CRITICAL: Process in micro-batches if batch size > 1
         micro_batch_size = self.config.update_micro_batch_size
@@ -756,11 +756,8 @@ class OasisGRPOTrainer:
                 mb_response_mask = response_mask[start_idx:end_idx]
                 mb_noise = noise[start_idx:end_idx]  # Get noise for this micro-batch
                 
-                # CRITICAL FIX: Always re-encode to allow gradients to flow
-                # The VAE encoder is frozen, but gradients need to flow through DiT
-                # We encode WITHOUT no_grad() so gradients can backprop
-                # Ensure frames are on GPU before encoding
-                latents = self.policy.encode_frames(mb_frames)
+                # Use cached latents
+                latents = all_latents[start_idx:end_idx]
                 
                 # Compute log probs with mixed precision
                 log_probs = []
@@ -792,8 +789,8 @@ class OasisGRPOTrainer:
                 log_probs_buffer[start_idx:end_idx] = log_probs.detach()
                 
                 # Cleanup
-                if not self.config.cache_encoded_frames:
-                    del latents
+                # if not self.config.cache_encoded_frames:
+                #     del latents
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 

@@ -600,6 +600,8 @@ class OasisGRPOTrainer:
         self,
         all_frames: torch.Tensor,
         actions: torch.Tensor,
+        log_probs: Optional[torch.Tensor] = None,
+        ref_log_probs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Compute GameWorldScore rewards.
@@ -642,7 +644,27 @@ class OasisGRPOTrainer:
                 )
             
             # Detach rewards to prevent gradient tracking
+            # Detach rewards to prevent gradient tracking
             rewards = rewards.detach()
+            
+            # Apply KL penalty if configured
+            if self.config.use_kl_in_reward and log_probs is not None and ref_log_probs is not None:
+                # KL = log_pi - log_ref
+                # Reward = Reward - beta * KL
+                kl = log_probs - ref_log_probs
+                kl_penalty = self.config.kl_coeff * kl
+                
+                # Ensure shapes match
+                if kl_penalty.shape != rewards.shape:
+                    # Try to align shapes if possible (e.g. if rewards are (B,) and KL is (B, T))
+                    # Usually rewards are (B, T-1) and KL is (B, T-1)
+                    pass
+                    
+                rewards = rewards - kl_penalty
+                
+                # Add KL info
+                info['kl_mean'] = kl.mean().item()
+                info['kl_penalty_mean'] = kl_penalty.mean().item()
             
         return rewards, info
     
@@ -907,6 +929,8 @@ class OasisGRPOTrainer:
         rewards, reward_info = self._compute_rewards(
             rollout_data['all_frames'],
             rollout_data['actions'],
+            log_probs=rollout_data.get('log_probs'),
+            ref_log_probs=rollout_data.get('ref_log_probs'),
         )
         reward_time = time.perf_counter() - reward_start
         
@@ -914,52 +938,7 @@ class OasisGRPOTrainer:
         if rewards.device != self.device:
             rewards = rewards.to(self.device)
         
-        # Apply KL penalty to rewards if enabled
-        if (self.config.use_kl_in_reward and 
-            hasattr(self, 'kl_controller') and 
-            rollout_data.get('ref_log_probs') is not None):
-            # Compute KL divergence between current and reference policy
-            old_log_probs = rollout_data['log_probs']  # (B*G, T_gen)
-            ref_log_probs = rollout_data['ref_log_probs']  # (B*G, T_gen)
-            
-            # Ensure same device
-            if old_log_probs.device != self.device:
-                old_log_probs = old_log_probs.to(self.device)
-            if ref_log_probs.device != self.device:
-                ref_log_probs = ref_log_probs.to(self.device)
-            
-            # Create response mask (all ones for generated frames)
-            response_mask = torch.ones_like(rewards, dtype=torch.float32)
-            
-            # Compute KL penalty (old_log_probs - ref_log_probs)
-            # Note: kl_penalty expects (logprob, ref_logprob), returns logprob - ref_logprob
-            kld = core_algos.kl_penalty(
-                logprob=old_log_probs,
-                ref_logprob=ref_log_probs,
-                kl_penalty='kl'
-            )  # (B*G, T_gen)
-            
-            # Apply response mask to KL divergence
-            kld = kld * response_mask
-            
-            # Get adaptive KL coefficient
-            beta = self.kl_controller.value
-            
-            # Apply KL penalty to rewards: rewards = rewards - beta * kld
-            # This penalizes policies that deviate from the reference policy
-            rewards = rewards - beta * kld
-            
-            # Update KL controller using masked mean (following RLVR-World pattern)
-            # Average KL over sequence length, then over batch
-            current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # Average over time: (B*G,)
-            current_kl = torch.mean(current_kl, dim=0).item()  # Average over batch: scalar
-            
-            # Update KL controller
-            batch_size = rewards.shape[0]
-            self.kl_controller.update(current_kl=current_kl, n_steps=batch_size)
-            
-            # Add KL metrics to reward_info
-            reward_info['kl_penalty'] = current_kl
+
             reward_info['kl_coeff'] = beta
             reward_info['kl_penalty_applied'] = True
             

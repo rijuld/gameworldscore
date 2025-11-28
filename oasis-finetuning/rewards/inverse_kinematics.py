@@ -454,7 +454,9 @@ class InverseKinematicsReward(nn.Module):
         actions: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict]:
         """
-        Compute RIK reward for a sequence of frames.
+        Compute RIK reward for a sequence of frames (OPTIMIZED: batched where possible).
+        
+        Note: VPT IDM processes sequentially, but SimpleIDM can batch.
         
         Args:
             frames: (B, T, C, H, W) sequence of frames
@@ -466,6 +468,49 @@ class InverseKinematicsReward(nn.Module):
         """
         B, T = frames.shape[:2]
         
+        if T < 2:
+            return torch.zeros(B, 0, device=frames.device), {
+                'rik_ce_loss': 0.0,
+                'rik_accuracy': 0.0,
+                'rik_using_vpt': self.use_vpt,
+            }
+        
+        # For SimpleIDM, we can batch process
+        if not self.use_vpt:
+            # Reshape to (B*(T-1), C, H, W) for batch processing
+            frame_t_batch = frames[:, :-1].contiguous()  # (B, T-1, C, H, W)
+            frame_t1_batch = frames[:, 1:].contiguous()   # (B, T-1, C, H, W)
+            actions_batch = actions.contiguous()  # (B, T-1, action_dim)
+            
+            B_seq = B * (T - 1)
+            frame_t_flat = frame_t_batch.view(B_seq, *frame_t_batch.shape[2:])
+            frame_t1_flat = frame_t1_batch.view(B_seq, *frame_t1_batch.shape[2:])
+            actions_flat = actions_batch.view(B_seq, *actions_batch.shape[2:])
+            
+            # Concatenate frames for SimpleIDM
+            frames_concat = torch.cat([frame_t_flat, frame_t1_flat], dim=1)  # (B*(T-1), 6, H, W)
+            
+            # Forward pass
+            logits = self.simple_idm(frames_concat)  # (B*(T-1), num_actions)
+            
+            # Compute reward
+            ce_loss = F.cross_entropy(logits, actions_flat.argmax(dim=-1), reduction='none')
+            reward_flat = torch.exp(-ce_loss)  # Normalize to [0, 1]
+            accuracy_flat = (logits.argmax(dim=-1) == actions_flat.argmax(dim=-1)).float()
+            
+            # Reshape back to (B, T-1)
+            rewards = reward_flat.view(B, T - 1)
+            
+            info = {
+                'rik_ce_loss': ce_loss.mean().item(),
+                'rik_accuracy': accuracy_flat.mean().item(),
+                'rik_using_vpt': False,
+            }
+            
+            return rewards, info
+        
+        # For VPT IDM, we still need to process sequentially (VPT limitation)
+        # But we can at least prepare batches more efficiently
         rewards = []
         ce_losses = []
         accuracies = []
@@ -485,7 +530,7 @@ class InverseKinematicsReward(nn.Module):
         info = {
             'rik_ce_loss': np.mean(ce_losses),
             'rik_accuracy': np.mean(accuracies),
-            'rik_using_vpt': self.use_vpt,
+            'rik_using_vpt': True,
         }
         
         return rewards, info

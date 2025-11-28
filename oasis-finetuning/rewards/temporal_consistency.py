@@ -198,7 +198,7 @@ class TemporalConsistencyReward(nn.Module):
         frames: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict]:
         """
-        Compute RTC reward for a sequence of frames.
+        Compute RTC reward for a sequence of frames (OPTIMIZED: batched).
         
         Args:
             frames: (B, T, C, H, W) sequence of frames
@@ -209,30 +209,57 @@ class TemporalConsistencyReward(nn.Module):
         """
         B, T = frames.shape[:2]
         
-        rewards = []
-        clip_sims = []
-        smoothness_scores = []
+        if T < 2:
+            return torch.zeros(B, 0, device=frames.device), {'rtc_clip_similarity': 0.0}
         
-        for t in range(T - 1):
-            frame_t2 = frames[:, t + 2] if (t + 2 < T and self.use_motion_smoothness) else None
-            
-            reward, info = self.compute_reward(
-                frames[:, t],
-                frames[:, t + 1],
-                frame_t2,
-            )
-            rewards.append(reward)
-            clip_sims.append(info['rtc_clip_similarity'])
-            if 'rtc_motion_smoothness' in info:
-                smoothness_scores.append(info['rtc_motion_smoothness'])
+        # Batch process all transitions at once
+        # frames[:, :-1] -> (B, T-1, C, H, W) - all frame_t
+        # frames[:, 1:] -> (B, T-1, C, H, W) - all frame_t1
+        frame_t_batch = frames[:, :-1].contiguous()  # (B, T-1, C, H, W)
+        frame_t1_batch = frames[:, 1:].contiguous()   # (B, T-1, C, H, W)
         
-        rewards = torch.stack(rewards, dim=1)
+        # Reshape to (B*(T-1), C, H, W) for batch processing
+        B_seq = B * (T - 1)
+        frame_t_flat = frame_t_batch.view(B_seq, *frame_t_batch.shape[2:])
+        frame_t1_flat = frame_t1_batch.view(B_seq, *frame_t1_batch.shape[2:])
+        
+        # Extract features for all transitions at once
+        feat_t = self.extract_features(frame_t_flat)  # (B*(T-1), D)
+        feat_t1 = self.extract_features(frame_t1_flat)  # (B*(T-1), D)
+        
+        # Cosine similarity (features already normalized)
+        clip_sim_flat = (feat_t * feat_t1).sum(dim=-1)  # (B*(T-1),)
+        
+        # Normalize from [-1, 1] to [0, 1]
+        rewards_flat = (clip_sim_flat + 1) / 2
+        
+        # Reshape back to (B, T-1)
+        rewards = rewards_flat.view(B, T - 1)
+        clip_sims = clip_sim_flat.view(B, T - 1)
         
         info = {
-            'rtc_clip_similarity': sum(clip_sims) / len(clip_sims),
+            'rtc_clip_similarity': clip_sims.mean().item(),
         }
-        if smoothness_scores:
-            info['rtc_motion_smoothness'] = sum(smoothness_scores) / len(smoothness_scores)
+        
+        # Motion smoothness (if enabled and we have enough frames)
+        if self.use_motion_smoothness and T >= 3:
+            frame_t2_batch = frames[:, 2:].contiguous()  # (B, T-2, C, H, W)
+            frame_t2_flat = frame_t2_batch.view(B * (T - 2), *frame_t2_batch.shape[2:])
+            
+            # Interpolated frames
+            interpolated = (frame_t_flat[:B*(T-2)] + frame_t2_flat) / 2
+            middle_frames = frame_t1_flat[:B*(T-2)]
+            
+            # MSE between interpolated and actual
+            diff = F.mse_loss(middle_frames, interpolated, reduction='none')
+            diff = diff.view(diff.shape[0], -1).mean(dim=-1)
+            smoothness_flat = 1.0 / (1.0 + diff)
+            smoothness_normalized = (smoothness_flat + 1) / 2
+            
+            # Combine with CLIP similarity for first T-2 transitions
+            rewards_smooth = rewards[:, :T-2] * 0.5 + smoothness_normalized.view(B, T-2) * 0.5
+            rewards[:, :T-2] = rewards_smooth
+            info['rtc_motion_smoothness'] = smoothness_flat.mean().item()
         
         return rewards, info
 

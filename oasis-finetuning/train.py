@@ -92,8 +92,8 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=4,
-        help="Training batch size (GRPO needs >=4 for stable normalization)",
+        default=1,
+        help="Training batch size (reduced to 1 for memory efficiency)",
     )
     parser.add_argument(
         "--n-prompt-frames",

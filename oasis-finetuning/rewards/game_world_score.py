@@ -168,6 +168,8 @@ class GameWorldScoreReward(nn.Module):
         """
         Compute GameWorldScore reward for a sequence of frames.
         
+        OPTIMIZED: Uses batched operations instead of sequential loops.
+        
         Args:
             frames: (B, T, C, H, W) sequence of frames (first is context)
             actions: (B, T-1, action_dim) actions for each transition
@@ -179,90 +181,59 @@ class GameWorldScoreReward(nn.Module):
         """
         import time
         
-        B, T = frames.shape[:2]
+        # Time RIK (batched)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        rik_start = time.perf_counter()
+        rik_rewards, rik_info = self.rik.compute_sequence_reward(frames, actions)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        rik_time_total = time.perf_counter() - rik_start
         
-        frame_rewards = []
-        rik_rewards = []
-        rtc_rewards = []
-        raq_rewards = []
+        # Time RTC (batched)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        rtc_start = time.perf_counter()
+        rtc_rewards, rtc_info = self.rtc.compute_sequence_reward(frames)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        rtc_time_total = time.perf_counter() - rtc_start
         
-        # Timing accumulators
-        rik_time_total = 0.0
-        rtc_time_total = 0.0
-        raq_time_total = 0.0
+        # Time RAQ (batched - note: RAQ is per-frame, so we need T rewards)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        raq_start = time.perf_counter()
+        raq_rewards_all, raq_info = self.raq.compute_sequence_reward(frames)
+        # RAQ is (B, T), but we need (B, T-1) to match transitions
+        raq_rewards = raq_rewards_all[:, 1:]  # Skip first frame (context)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        raq_time_total = time.perf_counter() - raq_start
         
-        all_info = {
-            'rik_ce_loss': [],
-            'rik_accuracy': [],
-            'rtc_clip_similarity': [],
-            'raq_aesthetic_score': [],
-            'raq_quality_score': [],
-        }
-        
-        for t in range(T - 1):
-            frame_t = frames[:, t]
-            frame_t1 = frames[:, t + 1]
-            action = actions[:, t]
-            frame_t2 = frames[:, t + 2] if t + 2 < T else None
-            
-            # Time RIK
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
-            rik_start = time.perf_counter()
-            rik_reward, rik_info = self.rik.compute_reward(frame_t, frame_t1, action)
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
-            rik_time_total += time.perf_counter() - rik_start
-            
-            # Time RTC
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
-            rtc_start = time.perf_counter()
-            rtc_reward, rtc_info = self.rtc.compute_reward(frame_t, frame_t1, frame_t2)
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
-            rtc_time_total += time.perf_counter() - rtc_start
-            
-            # Time RAQ
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
-            raq_start = time.perf_counter()
-            raq_reward, raq_info = self.raq.compute_reward(frame_t1)
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
-            raq_time_total += time.perf_counter() - raq_start
-            
-            # Weighted combination
-            total_reward = (
-                self.weights.rik * rik_reward +
-                self.weights.rtc * rtc_reward +
-                self.weights.raq * raq_reward
-            )
-            
-            frame_rewards.append(total_reward)
-            rik_rewards.append(rik_reward.mean().item())
-            rtc_rewards.append(rtc_reward.mean().item())
-            raq_rewards.append(raq_reward.mean().item())
-            
-            for key in all_info:
-                if key.startswith('rik_') and key in rik_info:
-                    all_info[key].append(rik_info[key])
-                elif key.startswith('rtc_') and key in rtc_info:
-                    all_info[key].append(rtc_info[key])
-                elif key.startswith('raq_') and key in raq_info:
-                    all_info[key].append(raq_info[key])
-        
-        frame_rewards = torch.stack(frame_rewards, dim=1)  # (B, T-1)
+        # Weighted combination: (B, T-1)
+        frame_rewards = (
+            self.weights.rik * rik_rewards +
+            self.weights.rtc * rtc_rewards +
+            self.weights.raq * raq_rewards
+        )
         
         # Aggregate info
         info = {
             'game_world_score': frame_rewards.mean().item(),
-            'rik_reward': sum(rik_rewards) / len(rik_rewards),
-            'rtc_reward': sum(rtc_rewards) / len(rtc_rewards),
-            'raq_reward': sum(raq_rewards) / len(raq_rewards),
+            'rik_reward': rik_rewards.mean().item(),
+            'rtc_reward': rtc_rewards.mean().item(),
+            'raq_reward': raq_rewards.mean().item(),
             # Timing info
             'time_rik_sec': rik_time_total,
             'time_rtc_sec': rtc_time_total,
             'time_raq_sec': raq_time_total,
         }
         
-        for key, values in all_info.items():
-            if values:
-                info[key] = sum(values) / len(values)
+        # Add sub-reward info if available
+        if 'rik_ce_loss' in rik_info:
+            info['rik_ce_loss'] = rik_info.get('rik_ce_loss', 0.0)
+        if 'rik_accuracy' in rik_info:
+            info['rik_accuracy'] = rik_info.get('rik_accuracy', 0.0)
+        if 'rtc_clip_similarity' in rtc_info:
+            info['rtc_clip_similarity'] = rtc_info.get('rtc_clip_similarity', 0.0)
+        if 'raq_aesthetic_score' in raq_info:
+            info['raq_aesthetic_score'] = raq_info.get('raq_aesthetic_score', 0.0)
+        if 'raq_quality_score' in raq_info:
+            info['raq_quality_score'] = raq_info.get('raq_quality_score', 0.0)
         
         if return_per_frame:
             return frame_rewards, info

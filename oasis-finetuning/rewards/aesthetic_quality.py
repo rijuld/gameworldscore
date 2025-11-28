@@ -269,7 +269,7 @@ class AestheticQualityReward(nn.Module):
         frames: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict]:
         """
-        Compute RAQ reward for a sequence of frames.
+        Compute RAQ reward for a sequence of frames (OPTIMIZED: batched).
         
         Args:
             frames: (B, T, C, H, W) sequence of frames
@@ -280,21 +280,25 @@ class AestheticQualityReward(nn.Module):
         """
         B, T = frames.shape[:2]
         
-        rewards = []
-        aesthetic_scores = []
-        quality_scores = []
+        # Reshape to (B*T, C, H, W) for batch processing
+        frames_flat = frames.view(B * T, *frames.shape[2:])
         
-        for t in range(T):
-            reward, info = self.compute_reward(frames[:, t])
-            rewards.append(reward)
-            aesthetic_scores.append(info['raq_aesthetic_score'])
-            quality_scores.append(info['raq_quality_score'])
+        # Compute aesthetic and quality scores for all frames at once
+        aesthetic_score = self.compute_aesthetic_score(frames_flat)  # (B*T,)
+        quality_score = self.compute_quality_score(frames_flat)    # (B*T,)
         
-        rewards = torch.stack(rewards, dim=1)
+        # Weighted combination
+        rewards_flat = (
+            self.musiq_weight * quality_score +
+            self.aesthetic_weight * aesthetic_score
+        )
+        
+        # Reshape back to (B, T)
+        rewards = rewards_flat.view(B, T)
         
         info = {
-            'raq_aesthetic_score': sum(aesthetic_scores) / len(aesthetic_scores),
-            'raq_quality_score': sum(quality_scores) / len(quality_scores),
+            'raq_aesthetic_score': aesthetic_score.mean().item(),
+            'raq_quality_score': quality_score.mean().item(),
         }
         
         return rewards, info

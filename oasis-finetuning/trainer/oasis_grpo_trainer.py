@@ -162,6 +162,17 @@ class OasisGRPOConfig:
 class OasisGRPOTrainer:
     """
     GRPO Trainer for Oasis world model using RLVR-World's implementation.
+    
+    GPU/CPU Offloading Strategy:
+    - Policy (DiT + VAE): Always on GPU during training and inference
+    - Reward models: On GPU if offload_reward_to_cpu=False, else on CPU
+      * If on CPU: frames temporarily moved to CPU for reward computation, then moved back to GPU
+      * If on GPU: everything stays on GPU (fastest path)
+    - Reference policy: On CPU if offload_ref_policy_to_cpu=True (saves ~14GB GPU memory)
+      * Frames temporarily moved to CPU only when computing KL divergence
+      * Results immediately moved back to GPU and CPU copies deleted
+    - All intermediate tensors: Aggressively deleted and GPU cache cleared after each major operation
+    - Training data: Always on GPU during training steps
     """
     
     def __init__(self, config: OasisGRPOConfig):
@@ -201,14 +212,20 @@ class OasisGRPOTrainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        # Enable gradient checkpointing if requested
-        if self.config.use_gradient_checkpointing:
-            if hasattr(self.policy.dit, 'enable_gradient_checkpointing'):
-                self.policy.dit.enable_gradient_checkpointing()
-                print("  Gradient checkpointing enabled")
-            elif hasattr(self.policy.dit, 'gradient_checkpointing_enable'):
-                self.policy.dit.gradient_checkpointing_enable()
-                print("  Gradient checkpointing enabled")
+        # Compile model for faster inference (PyTorch 2.0+)
+        try:
+            if hasattr(torch, 'compile'):
+                print("  Compiling policy model for faster inference...")
+                self.policy.dit = torch.compile(self.policy.dit, mode='reduce-overhead')
+                print("  ✓ Model compiled successfully")
+        except Exception as e:
+            print(f"  ⚠️  Model compilation failed (using uncompiled): {e}")
+        
+        # Enable gradient checkpointing only during training (not inference)
+        # We'll toggle this in train_step
+        self.use_gradient_checkpointing = self.config.use_gradient_checkpointing
+        if self.use_gradient_checkpointing:
+            print("  Gradient checkpointing will be enabled during training only")
         
         # Reference policy for KL computation (frozen)
         if self.config.use_kl_in_reward:
@@ -257,6 +274,23 @@ class OasisGRPOTrainer:
             raq_weight=self.config.raq_weight,
             require_vpt=self.config.require_vpt,
         )
+        
+        # Compile reward models for faster inference (if on GPU)
+        if reward_device == "cuda":
+            try:
+                if hasattr(torch, 'compile'):
+                    print("  Compiling reward models for faster inference...")
+                    if hasattr(self.reward_fn.rtc, 'clip_model'):
+                        self.reward_fn.rtc.clip_model = torch.compile(
+                            self.reward_fn.rtc.clip_model, mode='reduce-overhead'
+                        )
+                    if hasattr(self.reward_fn.raq, 'aesthetic_predictor'):
+                        self.reward_fn.raq.aesthetic_predictor = torch.compile(
+                            self.reward_fn.raq.aesthetic_predictor, mode='reduce-overhead'
+                        )
+                    print("  ✓ Reward models compiled successfully")
+            except Exception as e:
+                print(f"  ⚠️  Reward model compilation failed (using uncompiled): {e}")
         
         # Clear cache after loading reward models
         if torch.cuda.is_available():
@@ -346,8 +380,21 @@ class OasisGRPOTrainer:
         """
         self.policy.eval_mode()
         
+        # Disable gradient checkpointing during inference for speed
+        if self.use_gradient_checkpointing:
+            if hasattr(self.policy.dit, 'gradient_checkpointing_disable'):
+                self.policy.dit.gradient_checkpointing_disable()
+            elif hasattr(self.policy.dit, 'disable_gradient_checkpointing'):
+                self.policy.dit.disable_gradient_checkpointing()
+        
         B = initial_frames.shape[0]
         G = self.config.group_size
+        
+        # Ensure inputs are on GPU
+        if initial_frames.device != self.device:
+            initial_frames = initial_frames.to(self.device)
+        if actions.device != self.device:
+            actions = actions.to(self.device)
         
         # Repeat inputs for group generation
         # (B, ...) -> (B*G, ...)
@@ -357,22 +404,35 @@ class OasisGRPOTrainer:
         num_gen = min(actions.shape[1], self.config.max_gen_frames)
         
         with torch.no_grad():
-            # Generate frames
+            # Generate frames (everything on GPU)
             generated_frames = self.policy.generate_sequence(
                 initial_frames=initial_frames_repeated,
                 actions=actions_repeated[:, :num_gen],
                 num_frames=num_gen,
             )
             
-            # Compute log probabilities
+            # Ensure generated frames are on GPU
+            if generated_frames.device != self.device:
+                generated_frames = generated_frames.to(self.device)
+            
+            # Compute log probabilities (all on GPU)
             all_frames = torch.cat([initial_frames_repeated, generated_frames], dim=1)
             
-            # Delete intermediate tensors
+            # Ensure all_frames is on GPU
+            if all_frames.device != self.device:
+                all_frames = all_frames.to(self.device)
+            
+            # Delete intermediate tensors to free memory
             del generated_frames
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
+            # Encode frames (VAE is on GPU, so latents will be on GPU)
             latents = self.policy.encode_frames(all_frames)
+            
+            # Ensure latents are on GPU
+            if latents.device != self.device:
+                latents = latents.to(self.device)
             
             # Delete initial_frames_repeated to free memory
             del initial_frames_repeated
@@ -402,17 +462,20 @@ class OasisGRPOTrainer:
                 compute_kl_this_step = (self.global_step % self.config.kl_compute_freq == 0)
                 
                 if compute_kl_this_step:
-                    # Delete latents before computing ref_latents
+                    # Delete latents before computing ref_latents to free GPU memory
                     del latents
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     
-                    # If ref policy is on CPU, move frames to CPU for inference
+                    # If ref policy is on CPU, temporarily move frames to CPU
                     if self.ref_policy_device == "cpu":
                         all_frames_for_ref = all_frames.cpu()
+                        actions_for_ref = actions_repeated.cpu()
                     else:
                         all_frames_for_ref = all_frames
+                        actions_for_ref = actions_repeated
                     
+                    # Compute reference log probs
                     ref_latents = self.ref_policy.encode_frames(all_frames_for_ref)
                     ref_log_probs_list = []
                     
@@ -420,12 +483,7 @@ class OasisGRPOTrainer:
                         context = ref_latents[:, :t]
                         target = ref_latents[:, t:t+1]
                         action_idx = t - T_prompt
-                        
-                        # Actions need to be on same device as ref policy
-                        if self.ref_policy_device == "cpu":
-                            action = actions_repeated[:, action_idx:action_idx+1].cpu()
-                        else:
-                            action = actions_repeated[:, action_idx:action_idx+1]
+                        action = actions_for_ref[:, action_idx:action_idx+1]
                         
                         ref_log_prob = self.ref_policy.compute_log_prob(context, action, target)
                         ref_log_probs_list.append(ref_log_prob.detach())
@@ -434,12 +492,16 @@ class OasisGRPOTrainer:
                     
                     ref_log_probs = torch.stack(ref_log_probs_list, dim=1)
                     
-                    # Move ref_log_probs back to GPU if needed
+                    # Immediately move ref_log_probs back to GPU and clean up CPU copies
                     if self.ref_policy_device == "cpu":
                         ref_log_probs = ref_log_probs.to(self.device)
-                        del all_frames_for_ref
+                        del all_frames_for_ref, actions_for_ref, ref_latents
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    else:
+                        del ref_latents
                     
-                    del ref_latents, ref_log_probs_list
+                    del ref_log_probs_list
                 else:
                     # Skip KL computation this step
                     del latents
@@ -447,17 +509,28 @@ class OasisGRPOTrainer:
             else:
                 del latents
         
-        # Create group indices
+        # Create group indices (on GPU)
         # [0, 0, 0, 0, 1, 1, 1, 1, ...]
         indices = torch.arange(B, device=self.device).repeat_interleave(G)
         
+        # Ensure all return values are on GPU
+        if all_frames.device != self.device:
+            all_frames = all_frames.to(self.device)
+        if log_probs.device != self.device:
+            log_probs = log_probs.to(self.device)
+        if ref_log_probs is not None and ref_log_probs.device != self.device:
+            ref_log_probs = ref_log_probs.to(self.device)
+        actions_return = actions_repeated[:, :num_gen]
+        if actions_return.device != self.device:
+            actions_return = actions_return.to(self.device)
+        
         return {
             'generated_frames': None,  # Don't keep generated_frames in memory
-            'all_frames': all_frames,
-            'log_probs': log_probs,
-            'ref_log_probs': ref_log_probs,
-            'actions': actions_repeated[:, :num_gen],
-            'indices': indices,
+            'all_frames': all_frames,  # On GPU
+            'log_probs': log_probs,  # On GPU
+            'ref_log_probs': ref_log_probs,  # On GPU (if computed)
+            'actions': actions_return,  # On GPU
+            'indices': indices,  # On GPU
         }
     
     def _compute_rewards(
@@ -465,28 +538,47 @@ class OasisGRPOTrainer:
         all_frames: torch.Tensor,
         actions: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute GameWorldScore rewards."""
+        """
+        Compute GameWorldScore rewards.
+        
+        Optimized GPU/CPU offloading:
+        - If reward models are on GPU: keep everything on GPU
+        - If reward models are on CPU: temporarily move frames to CPU, compute, move results back to GPU
+        """
         with torch.no_grad():
-            # Move frames to reward device if needed (CPU offloading)
-            if self.config.offload_reward_to_cpu:
+            # Determine reward device
+            reward_device = "cpu" if self.config.offload_reward_to_cpu else self.device
+            
+            if reward_device == "cpu":
+                # Temporarily move to CPU for reward computation
                 all_frames_cpu = all_frames.cpu()
                 actions_cpu = actions.cpu()
+                
+                # Compute rewards on CPU
                 rewards, info = self.reward_fn.compute_sequence_reward(
                     all_frames_cpu,
                     actions_cpu,
                     return_per_frame=True,
                 )
-                # Move rewards back to GPU
+                
+                # Immediately move rewards back to GPU and delete CPU copies
                 rewards = rewards.to(self.device)
                 del all_frames_cpu, actions_cpu
+                
+                # Clear CPU cache
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             else:
+                # Everything stays on GPU - fastest path
                 rewards, info = self.reward_fn.compute_sequence_reward(
                     all_frames,
                     actions,
                     return_per_frame=True,
                 )
+            
             # Detach rewards to prevent gradient tracking
             rewards = rewards.detach()
+            
         return rewards, info
     
     def _compute_advantages(
@@ -551,6 +643,13 @@ class OasisGRPOTrainer:
         """
         self.policy.train_mode()
         
+        # Enable gradient checkpointing during training for memory efficiency
+        if self.use_gradient_checkpointing:
+            if hasattr(self.policy.dit, 'gradient_checkpointing_enable'):
+                self.policy.dit.gradient_checkpointing_enable()
+            elif hasattr(self.policy.dit, 'enable_gradient_checkpointing'):
+                self.policy.dit.enable_gradient_checkpointing()
+        
         B = all_frames.shape[0]
         T_prompt = self.config.n_prompt_frames
         T_gen = all_frames.shape[1] - T_prompt
@@ -591,9 +690,15 @@ class OasisGRPOTrainer:
                 start_idx = mb_idx * micro_batch_size
                 end_idx = min((mb_idx + 1) * micro_batch_size, B)
                 
-                # Get micro-batch
+                # Get micro-batch (ensure on GPU)
                 mb_frames = all_frames[start_idx:end_idx]
+                if mb_frames.device != self.device:
+                    mb_frames = mb_frames.to(self.device)
+                
                 mb_actions = actions[start_idx:end_idx]
+                if mb_actions.device != self.device:
+                    mb_actions = mb_actions.to(self.device)
+                
                 mb_old_log_probs = old_log_probs[start_idx:end_idx]
                 mb_advantages = advantages[start_idx:end_idx]
                 mb_response_mask = response_mask[start_idx:end_idx]
@@ -601,6 +706,7 @@ class OasisGRPOTrainer:
                 # CRITICAL FIX: Always re-encode to allow gradients to flow
                 # The VAE encoder is frozen, but gradients need to flow through DiT
                 # We encode WITHOUT no_grad() so gradients can backprop
+                # Ensure frames are on GPU before encoding
                 latents = self.policy.encode_frames(mb_frames)
                 
                 # Compute log probs with mixed precision
@@ -703,8 +809,11 @@ class OasisGRPOTrainer:
         # Clear cached latents to free memory (if they were created)
         if self.config.cache_encoded_frames:
             del cached_latents_for_reference
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        
+        # Aggressive GPU memory cleanup after training step
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         
         result = {k: np.mean(v) if v else float('nan') for k, v in metrics.items()}
         result['update_success_rate'] = successful_updates / self.config.grpo_epochs
@@ -745,7 +854,7 @@ class OasisGRPOTrainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        # 2. Compute rewards
+        # 2. Compute rewards (frames stay on GPU if reward models are on GPU)
         print(f"  [Profile] Starting Reward Computation...")
         reward_start = time.perf_counter()
         rewards, reward_info = self._compute_rewards(
@@ -754,6 +863,10 @@ class OasisGRPOTrainer:
         )
         reward_time = time.perf_counter() - reward_start
         print(f"  [Profile] Reward computation finished in {reward_time:.2f}s")
+        
+        # Ensure rewards are on GPU
+        if rewards.device != self.device:
+            rewards = rewards.to(self.device)
         
         # Print detailed reward breakdown immediately
         print(f"  [Rewards] Mean Total: {rewards.mean().item():.4f}")
@@ -781,20 +894,35 @@ class OasisGRPOTrainer:
         # Delete rewards after computing advantages
         del rewards
         
-        # 4. Update policy
+        # 4. Update policy (ensure all data is on GPU)
         print(f"  [Profile] Starting GRPO Update...")
         grpo_start = time.perf_counter()
+        
+        # Ensure all inputs are on GPU
+        rollout_frames = rollout_data['all_frames']
+        rollout_actions = rollout_data['actions']
+        rollout_log_probs = rollout_data['log_probs']
+        
+        if rollout_frames.device != self.device:
+            rollout_frames = rollout_frames.to(self.device)
+        if rollout_actions.device != self.device:
+            rollout_actions = rollout_actions.to(self.device)
+        if rollout_log_probs.device != self.device:
+            rollout_log_probs = rollout_log_probs.to(self.device)
+        if advantages.device != self.device:
+            advantages = advantages.to(self.device)
+        
         update_metrics = self._grpo_update(
-            rollout_data['all_frames'],
-            rollout_data['actions'],
-            rollout_data['log_probs'],
+            rollout_frames,
+            rollout_actions,
+            rollout_log_probs,
             advantages,
         )
         grpo_time = time.perf_counter() - grpo_start
         print(f"  [Profile] GRPO Update finished in {grpo_time:.2f}s")
         
-        # Clean up rollout data
-        del rollout_data, advantages
+        # Clean up rollout data and free GPU memory
+        del rollout_data, advantages, rollout_frames, rollout_actions, rollout_log_probs
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()

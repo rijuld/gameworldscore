@@ -29,8 +29,8 @@ reward:
 data:
   data_dir: "Dataset/MiDaS-60_small"
   dataset_type: "auto"  # auto, video, or midas
-  train_batch_size: 4  # GRPO requires batch_size >= 4 for stable normalization
-  val_batch_size: 2
+  train_batch_size: 1  # Reduced to 1 for memory efficiency
+  val_batch_size: 1
   clip_length: 16
   n_prompt_frames: 1
   max_gen_frames: 4
@@ -44,7 +44,7 @@ training:
   total_epochs: 10
   total_training_steps: 10000
   grpo_epochs: 4  # Multiple epochs per rollout for sample efficiency
-  grpo_mini_batch_size: 4
+  grpo_mini_batch_size: 1  # Reduced to 1 for memory efficiency
   learning_rate: 5.0e-7  # Conservative learning rate for stability
   weight_decay: 0.01
   grad_clip: 1.0  # Gradient clipping threshold
@@ -74,7 +74,7 @@ kl:
 rollout:
   n_rollouts: 1
   temperature: 1.0
-  ddim_steps: 10
+  ddim_steps: 5  # Reduced from 10 to 5 for faster generation (quality trade-off)
   do_sample: true
   
 # Checkpointing and logging

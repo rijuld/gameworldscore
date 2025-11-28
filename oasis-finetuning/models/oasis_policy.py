@@ -85,15 +85,9 @@ class OasisPolicy(nn.Module):
             load_model(self.dit, oasis_ckpt)
         self.dit = self.dit.to(device)
         
-        # Enable gradient checkpointing to save memory
-        if hasattr(self.dit, 'gradient_checkpointing_enable'):
-            self.dit.gradient_checkpointing_enable()
-        elif hasattr(self.dit, 'blocks'):
-            # Manual gradient checkpointing for transformer blocks
-            from torch.utils.checkpoint import checkpoint
-            self._use_checkpoint = True
-        else:
-            self._use_checkpoint = False
+        # Gradient checkpointing will be controlled by trainer
+        # (enabled during training, disabled during inference)
+        self._use_checkpoint = False  # Will be set by trainer if needed
         
         # Load VAE
         self.vae = OasisVAE(vae_ckpt=vae_ckpt, device=device, dtype=dtype)

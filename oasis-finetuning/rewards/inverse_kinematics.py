@@ -7,9 +7,7 @@ the generated frame transition is consistent with the intended action.
 The reward is based on how well the IDM's predicted action matches
 the intended action from the generated transition.
 
-Supports:
-1. VPT IDM (OpenAI's Video Pre-Training model) - high quality
-2. SimpleIDM (fallback CNN) - for development/testing
+Uses VPT IDM (OpenAI's Video Pre-Training model) for high-quality action prediction.
 """
 
 import os
@@ -122,8 +120,6 @@ class VPTIDMWrapper(nn.Module):
             self.agent.load_weights(weights_path)
             self.agent_resolution = AGENT_RESOLUTION
             self._vpt_available = True
-            print("  ✓ VPT IDM loaded successfully")
-            
             print("  ✓ VPT IDM loaded successfully")
             
         except Exception as e:
@@ -350,8 +346,8 @@ class InverseKinematicsReward(nn.Module):
             
             if key == "cameraX":
                 # VPT predicts 'camera' as [dy, dx] (pitch, yaw)
-                # Oasis cameraX is dx (yaw) -> index 1
-                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 1]
+                # Oasis cameraX is camera[0] -> index 0
+                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 0]
                 pred_val = torch.from_numpy(pred_val_np).to(self.device).float()
                 
                 # Normalize predicted value to match Oasis range [-1, 1] roughly
@@ -385,8 +381,8 @@ class InverseKinematicsReward(nn.Module):
                 
             elif key == "cameraY":
                 # VPT predicts 'camera' as [dy, dx] (pitch, yaw)
-                # Oasis cameraY is dy (pitch) -> index 0
-                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 0]
+                # Oasis cameraY is camera[1] -> index 1
+                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 1]
                 pred_val = torch.from_numpy(pred_val_np).to(self.device).float()
                 
                 threshold = 0.05
@@ -458,7 +454,7 @@ class InverseKinematicsReward(nn.Module):
         """
         Compute RIK reward for a sequence of frames (OPTIMIZED: batched where possible).
         
-        Note: VPT IDM processes sequentially, but SimpleIDM can batch.
+        Note: VPT IDM processes sequentially due to its recurrent architecture.
         
         OPTIMIZED: Ensures all inputs stay on GPU throughout computation.
         

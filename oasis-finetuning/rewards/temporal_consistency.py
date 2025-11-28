@@ -1,39 +1,24 @@
 """
-TemporalConsistencyRewardV2
+TemporalConsistencyRewardV4
+Optimized for batch size = 1.
 
-Fully rewritten temporal consistency reward module implementing:
+Features:
+- Stable reward formula (1 / (1 + loss)) for batch size 1
+- Automatic disabling of normalization when B=1
 - Multiscale L1 + SSIM photometric warping loss
-- Forward-backward flow consistency
-- Total Variation (TV) flicker detector
-- Exponential reward scaling with normalization option
-- Vectorized batched sequence processing (B, T, C, H, W)
-- Robust handling of RAFT API/torchvision versions
-
-Usage:
-    model = TemporalConsistencyRewardV2(device='cuda', alpha=30.0)
-    rewards, info = model.compute_sequence_reward(frames)
-
-Returns:
-    rewards: (B, T-1) reward per transition in [0,1]
-    info:   dict with components and aggregated statistics
-
-Notes:
-- The class ships a lightweight SSIM implementation so it is self-contained.
-- RAFT expects inputs in roughly [0,255]; this implementation scales inputs by 255
-  before forwarding to the optical flow model. Adjust normalization if you use a
-  different flow backbone.
-- If torchvision's optical_flow models are not available, the class raises an
-  informative error.
-
+- Forward-backward flow consistency (small default weight)
+- Temporal TV flicker loss
+- Proper RAFT input normalization and flow resizing
+- No forced upscaling (safe for small images)
+- Batched (B,T,C,H,W) with B=1 supported
 """
 
-from typing import Dict, Tuple, Optional, List
-
+from typing import Dict, Tuple, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Try to import RAFT optical flow from torchvision (newer versions) or fallback
+# Try to import RAFT
 try:
     import torchvision.models.optical_flow as optical_flow_models
 except Exception:
@@ -41,26 +26,20 @@ except Exception:
 
 
 # ---------------------------- Lightweight SSIM ---------------------------- #
-# Self-contained SSIM implementation adapted for clarity and stability.
-# Returns average SSIM in [0, 1] across channels.
-
-def _gaussian_kernel(window_size: int = 11, sigma: float = 1.5, device='cpu') -> torch.Tensor:
+def _gaussian_kernel(window_size=11, sigma=1.5, device='cpu'):
     coords = torch.arange(window_size, dtype=torch.float32, device=device) - (window_size - 1) / 2.0
     g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
     g = g / g.sum()
-    window = g[:, None] * g[None, :]
-    return window
+    return g[:, None] * g[None, :]
 
 
-def ssim_map(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, K=(0.01, 0.03), L: float = 1.0) -> torch.Tensor:
-    # img1,img2: (B, C, H, W), values in [0,1]
-    # returns mean SSIM per batch element
+def ssim_map(img1, img2, window_size=11, K=(0.01, 0.03), L=1.0):
     B, C, H, W = img1.shape
     device = img1.device
-    window = _gaussian_kernel(window_size, sigma=1.5, device=device).unsqueeze(0).unsqueeze(0)  # (1,1,ws,ws)
+    window = _gaussian_kernel(window_size, 1.5, device).unsqueeze(0).unsqueeze(0)
 
-    mu1 = F.conv2d(img1.view(B * C, 1, H, W), window, padding=window_size // 2, groups=1)
-    mu2 = F.conv2d(img2.view(B * C, 1, H, W), window, padding=window_size // 2, groups=1)
+    mu1 = F.conv2d(img1.view(B * C, 1, H, W), window, padding=window_size // 2)
+    mu2 = F.conv2d(img2.view(B * C, 1, H, W), window, padding=window_size // 2)
 
     mu1 = mu1.view(B, C, H, W)
     mu2 = mu2.view(B, C, H, W)
@@ -70,289 +49,239 @@ def ssim_map(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, K=(0
     mu1_mu2 = mu1 * mu2
 
     sigma1_sq = (
-        F.conv2d((img1 * img1).view(B * C, 1, H, W), window, padding=window_size // 2).view(B, C, H, W)
-        - mu1_sq
+        F.conv2d((img1 * img1).view(B * C, 1, H, W), window, padding=window_size // 2)
+        .view(B, C, H, W) - mu1_sq
     )
+
     sigma2_sq = (
-        F.conv2d((img2 * img2).view(B * C, 1, H, W), window, padding=window_size // 2).view(B, C, H, W)
-        - mu2_sq
+        F.conv2d((img2 * img2).view(B * C, 1, H, W), window, padding=window_size // 2)
+        .view(B, C, H, W) - mu2_sq
     )
+
     sigma12 = (
-        F.conv2d((img1 * img2).view(B * C, 1, H, W), window, padding=window_size // 2).view(B, C, H, W)
-        - mu1_mu2
+        F.conv2d((img1 * img2).view(B * C, 1, H, W), window, padding=window_size // 2)
+        .view(B, C, H, W) - mu1_mu2
     )
 
     C1 = (K[0] * L) ** 2
     C2 = (K[1] * L) ** 2
 
-    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
-    # spatial average
-    ssim_per_channel = ssim_map.view(B, C, -1).mean(dim=-1)  # (B, C)
-    # average across channels
-    ssim_per_batch = ssim_per_channel.mean(dim=1)  # (B,)
-    return ssim_per_batch
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+               ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+
+    return ssim_map.view(B, C, -1).mean(dim=2).mean(dim=1)  # (B,)
 
 
-# ---------------------------- Core Module ---------------------------- #
+# ---------------------------- TemporalConsistencyReward ---------------------------- #
 class TemporalConsistencyRewardV2(nn.Module):
     def __init__(
         self,
-        device: str = 'cuda',
-        raft_model_name: str = 'raft_large',
-        alpha: float = 30.0,  # exponent scale for reward: reward = exp(-alpha * loss)
-        use_ssim: bool = True,
-        ssim_weight: float = 0.5,
-        l1_weight: float = 0.5,
-        tv_weight: float = 0.02,
-        fb_weight: float = 1.0,
-        multiscale: List[float] = [1.0, 0.5, 0.25],
-        normalize_rewards: bool = False,
-    ) -> None:
+        device='cuda',
+        raft_model_name='raft_large',
+        reward_type='reciprocal',   # safe for batch size = 1
+        alpha=1.0,                  # only used if reward_type='exp'
+        use_ssim=True,
+        ssim_weight=0.5,
+        l1_weight=0.5,
+        tv_weight=0.02,
+        fb_weight=0.1,
+        multiscale=[1.0, 0.5],
+        normalize_rewards=False,    # batch size 1 → keep False!
+        debug=False
+    ):
         super().__init__()
+
         self.device = torch.device(device)
-        self.alpha = float(alpha)
+        self.reward_type = reward_type
+        self.alpha = alpha
         self.use_ssim = use_ssim
-        self.ssim_weight = float(ssim_weight)
-        self.l1_weight = float(l1_weight)
-        self.tv_weight = float(tv_weight)
-        self.fb_weight = float(fb_weight)
+        self.ssim_weight = ssim_weight
+        self.l1_weight = l1_weight
+        self.tv_weight = tv_weight
+        self.fb_weight = fb_weight
         self.multiscale = multiscale
         self.normalize_rewards = normalize_rewards
+        self.debug = debug
 
         if optical_flow_models is None:
-            raise ImportError(
-                'torchvision.models.optical_flow not found. Please install a recent torchvision `pip install torchvision`.'
-            )
+            raise ImportError("torchvision optical_flow not available.")
 
-        # Load RAFT (or chosen) optical flow model
-        if raft_model_name == 'raft_large' and getattr(optical_flow_models, 'raft_large', None) is not None:
-            self.flow_model = optical_flow_models.raft_large(pretrained=True).to(self.device).eval()
-        elif raft_model_name == 'raft_small' and getattr(optical_flow_models, 'raft_small', None) is not None:
-            self.flow_model = optical_flow_models.raft_small(pretrained=True).to(self.device).eval()
+        # Load RAFT
+        if hasattr(optical_flow_models, raft_model_name):
+            self.flow_model = getattr(optical_flow_models, raft_model_name)(pretrained=True).to(self.device).eval()
         else:
-            # fallback: try to use any available attribute
-            candidates = [n for n in dir(optical_flow_models) if n.startswith('raft')]
-            if not candidates:
-                raise RuntimeError('No RAFT-like model found in torchvision.models.optical_flow')
-            chosen = candidates[0]
-            self.flow_model = getattr(optical_flow_models, chosen)(pretrained=True).to(self.device).eval()
+            self.flow_model = optical_flow_models.raft_large(pretrained=True).to(self.device).eval()
 
         for p in self.flow_model.parameters():
             p.requires_grad = False
 
-        # Small epsilon used for numerical stability
         self.eps = 1e-6
 
-    # ---------------------- utilities ----------------------
-    def _normalize_for_raft(self, img: torch.Tensor) -> torch.Tensor:
-        """Scale image to RAFT-friendly input. RAFT is typically trained on 0-255 images.
-        We accept inputs in [0,1] and scale to [0,255]."""
-        if img.dtype != torch.float32:
-            img = img.float()
-        return img * 255.0
+    # ------------------------------------- Utils ------------------------------------- #
 
-    def _resize(self, x: torch.Tensor, scale: float) -> torch.Tensor:
-        B, C, H, W = x.shape
-        
-        # Determine effective scale to ensure min dimension >= 128 (required by RAFT)
-        min_dim = min(H, W)
-        if min_dim * scale < 128:
-            scale = 128.0 / min_dim
-            
+    def _normalize_for_raft(self, x):
+        return x.float() * 255.0
+
+    def _resize(self, x, scale):
         if scale == 1.0:
             return x
-            
-        newH = int(round(H * scale))
-        newW = int(round(W * scale))
-        
-        # Ensure divisibility by 8 for RAFT
+        B, C, H, W = x.shape
+        newH = max(2, int(round(H * scale)))
+        newW = max(2, int(round(W * scale)))
         newH = ((newH + 7) // 8) * 8
         newW = ((newW + 7) // 8) * 8
-        
+        if newH == H and newW == W:
+            return x
         return F.interpolate(x, size=(newH, newW), mode='bilinear', align_corners=False)
 
-    def _make_grid(self, B: int, H: int, W: int, device: torch.device):
-        grid_y, grid_x = torch.meshgrid(
+    def _resize_flow_to(self, flow, target_h, target_w):
+        B, _, h, w = flow.shape
+        if h == target_h and w == target_w:
+            return flow
+        flow_resized = F.interpolate(flow, size=(target_h, target_w), mode='bilinear', align_corners=False)
+        flow_resized[:, 0] *= (target_w / w)
+        flow_resized[:, 1] *= (target_h / h)
+        return flow_resized
+
+    def _make_grid(self, B, H, W, device):
+        gy, gx = torch.meshgrid(
             torch.arange(H, device=device, dtype=torch.float32),
             torch.arange(W, device=device, dtype=torch.float32),
-            indexing='ij',
+            indexing='ij'
         )
-        grid = torch.stack((grid_x, grid_y), dim=0)  # (2, H, W)
-        grid = grid.unsqueeze(0).expand(B, -1, -1, -1)  # (B, 2, H, W)
-        return grid
+        return torch.stack((gx, gy), 0).unsqueeze(0).expand(B, -1, -1, -1)
 
-    def _warp_frame(self, image: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
-        """Warp image (B,C,H,W) by flow (B,2,H,W). Flow is (dx, dy) in pixels.
-        Uses align_corners=False for grid_sample."""
-        B, C, H, W = image.shape
-        device = image.device
-
-        grid = self._make_grid(B, H, W, device=device)
+    def _warp(self, img, flow):
+        B, C, H, W = img.shape
+        grid = self._make_grid(B, H, W, img.device)
         vgrid = grid + flow
+        vgrid = torch.stack([
+            2.0 * vgrid[:, 0] / max(W - 1, 1) - 1.0,
+            2.0 * vgrid[:, 1] / max(H - 1, 1) - 1.0
+        ], dim=-1)
+        return F.grid_sample(img, vgrid, mode='bilinear', padding_mode='border', align_corners=False)
 
-        # Normalize to [-1,1]
-        vgrid_x = 2.0 * vgrid[:, 0, :, :] / max(W - 1, 1) - 1.0
-        vgrid_y = 2.0 * vgrid[:, 1, :, :] / max(H - 1, 1) - 1.0
-        vgrid = torch.stack((vgrid_x, vgrid_y), dim=-1)  # (B, H, W, 2)
+    # -------------------------------- Loss Components --------------------------------- #
 
-        warped = F.grid_sample(image, vgrid, mode='bilinear', padding_mode='border', align_corners=False)
-        return warped
-
-    # ---------------------- loss components ----------------------
     @torch.no_grad()
-    def _estimate_flow(self, img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
-        """Estimate flow img1->img2 with RAFT. Returns (B,2,H,W). Handles variable RAFT outputs."""
-        # RAFT accepts (B, C, H, W) floats; we already scaled to [0,255]
-        # Some RAFT wrappers return a list of flows; take the last one.
-        out = self.flow_model(img1, img2)
-        if isinstance(out, (list, tuple)):
-            flow = out[-1]
-        else:
-            flow = out
-        # Ensure shape (B,2,H,W)
-        return flow
+    def _estimate_flow(self, x1, x2):
+        out = self.flow_model(x1, x2)
+        return out[-1] if isinstance(out, (list, tuple)) else out
 
-    def _photometric_multiscale_loss(self, frame_t: torch.Tensor, frame_t1: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
-        """Compute multiscale photometric loss (L1 + SSIM) between warped frame_t and frame_t1.
-        Returns per-batch loss (B,) and diagnostic dictionary."""
-        device = frame_t.device
-        B, C, H, W = frame_t.shape
-
-        total_loss_per_scale = []
-        details = {
-            'l1_per_scale': [],
-            'ssim_per_scale': [],
-            'warped_mse_per_scale': [],
-        }
+    def _photometric_multiscale(self, t, t1):
+        losses, info = [], {}
 
         for scale in self.multiscale:
-            ft = self._resize(frame_t, scale)
-            ft1 = self._resize(frame_t1, scale)
-            # Estimate flow at this scale (we scale inputs for RAFT consistently but RAFT may expect original size)
-            # Simpler: estimate flow at the scaled resolution by up/downscaling the original flow - but we will compute directly on scaled images.
-            raft_in_1 = self._normalize_for_raft(ft)
-            raft_in_2 = self._normalize_for_raft(ft1)
-            flow = self._estimate_flow(raft_in_1, raft_in_2)  # (B,2,h,w)
+            ft = self._resize(t, scale)
+            ft1 = self._resize(t1, scale)
 
-            # If raft returns flow at original resolution, we should resize flow to current resolution - assume returned flow matches input resolution.
-            warped = self._warp_frame(ft, flow)
+            raft_in1 = self._normalize_for_raft(ft)
+            raft_in2 = self._normalize_for_raft(ft1)
 
-            # L1
-            l1_per_pixel = (warped - ft1).abs()
-            l1 = l1_per_pixel.view(B, -1).mean(dim=-1)  # (B,)
+            flow = self._estimate_flow(raft_in1, raft_in2)
 
-            # SSIM
+            if flow.shape[2:] != ft.shape[2:]:
+                flow = self._resize_flow_to(flow, ft.shape[2], ft.shape[3])
+
+            warped = self._warp(ft, flow)
+
+            l1 = (warped - ft1).abs().mean(dim=[1, 2, 3])
+
             if self.use_ssim:
-                ssim_val = ssim_map(warped, ft1)  # (B,)
-                ssim_loss = 1.0 - ssim_val
+                ssim_loss = 1 - ssim_map(warped.clamp(0, 1), ft1.clamp(0, 1))
             else:
                 ssim_loss = torch.zeros_like(l1)
 
-            # Weighted combination
-            scale_loss = self.l1_weight * l1 + self.ssim_weight * ssim_loss
+            loss = self.l1_weight * l1 + self.ssim_weight * ssim_loss
+            losses.append(loss)
 
-            total_loss_per_scale.append(scale_loss)
-            details['l1_per_scale'].append(l1.mean().item())
-            details['ssim_per_scale'].append((1.0 - ssim_loss).mean().item())
+        total = torch.stack(losses).mean(dim=0)
+        info["photometric_loss"] = total.mean().item()
 
-        # Average across scales
-        total_loss = torch.stack(total_loss_per_scale, dim=0).mean(dim=0)  # (B,)
-        details['photometric_loss_mean'] = total_loss.mean().item()
-        return total_loss, details
+        return total, info
 
-    def _forward_backward_consistency(self, frame_t: torch.Tensor, frame_t1: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
-        """Compute forward-backward flow consistency metric (B,)
-        Consistency: || fwd + warp(back, fwd) ||_1 averaged"""
-        raft_in_1 = self._normalize_for_raft(frame_t)
-        raft_in_2 = self._normalize_for_raft(frame_t1)
-        flow_fwd = self._estimate_flow(raft_in_1, raft_in_2)  # (B,2,H,W)
-        flow_bwd = self._estimate_flow(raft_in_2, raft_in_1)  # (B,2,H,W)
+    def _fb_consistency(self, t, t1):
+        raft1 = self._normalize_for_raft(t)
+        raft2 = self._normalize_for_raft(t1)
 
-        # Warp backward flow into forward frame coordinate: W(flow_bwd, flow_fwd)
-        warped_bwd = self._warp_frame(flow_bwd, flow_fwd)
+        fwd = self._estimate_flow(raft1, raft2)
+        bwd = self._estimate_flow(raft2, raft1)
 
-        consistency_map = (flow_fwd + warped_bwd).abs()  # (B,2,H,W)
-        consistency = consistency_map.view(consistency_map.shape[0], -1).mean(dim=-1)  # (B,)
+        if fwd.shape[2:] != t.shape[2:]:
+            fwd = self._resize_flow_to(fwd, t.shape[2], t.shape[3])
+        if bwd.shape[2:] != t.shape[2:]:
+            bwd = self._resize_flow_to(bwd, t.shape[2], t.shape[3])
 
-        return consistency, {'fb_consistency_mean': consistency.mean().item()}
+        warped_bwd = self._warp(bwd, fwd)
+        c = (fwd + warped_bwd).abs().mean(dim=[1, 2, 3])
 
-    def _temporal_tv(self, frame_t: torch.Tensor, frame_t1: torch.Tensor) -> torch.Tensor:
-        # L1 of pixel differences (flicker detector)
-        diff = (frame_t1 - frame_t).abs()
-        return diff.view(diff.shape[0], -1).mean(dim=-1)
+        return c, {"fb_consistency": c.mean().item()}
 
-    # ---------------------- public API ----------------------
-    @torch.no_grad()
-    def compute_reward(self, frame_t: torch.Tensor, frame_t1: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
-        """Compute reward for a single transition (B,)"""
-        if frame_t.device != self.device:
-            frame_t = frame_t.to(self.device)
-            frame_t1 = frame_t1.to(self.device)
+    def _tv(self, t, t1):
+        tv = (t1 - t).abs().mean(dim=[1, 2, 3])
+        return tv
 
-        photometric_loss, photometric_details = self._photometric_multiscale_loss(frame_t, frame_t1)
-        fb_consistency, fb_details = self._forward_backward_consistency(frame_t, frame_t1)
-        tv = self._temporal_tv(frame_t, frame_t1)
-
-        # Combine
-        total_loss = photometric_loss + self.fb_weight * fb_consistency + self.tv_weight * tv
-
-        # Exponential scaling to produce reward in (0,1]
-        reward = torch.exp(-self.alpha * total_loss)
-
-        # Optional normalization (per-batch): map rewards to [0,1] using min/max for better contrast in same-batch comparisons
-        if self.normalize_rewards:
-            rmin = reward.min(dim=0, keepdim=True).values
-            rmax = reward.max(dim=0, keepdim=True).values
-            reward = (reward - rmin) / (rmax - rmin + self.eps)
-
-        info = {
-            'photometric_loss_mean': photometric_details['photometric_loss_mean'],
-            'fb_consistency_mean': fb_details['fb_consistency_mean'],
-            'tv_mean': tv.mean().item(),
-            'total_loss_mean': total_loss.mean().item(),
-            'reward_mean': reward.mean().item(),
-        }
-        return reward, info
+    # -------------------------------- Public API -------------------------------------- #
 
     @torch.no_grad()
-    def compute_sequence_reward(self, frames: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
-        """Compute rewards for a sequence of frames: frames (B, T, C, H, W)
-        Returns rewards (B, T-1) and aggregated info.
-        """
-        if frames.device != self.device:
-            frames = frames.to(self.device)
+    def compute_reward(self, t, t1):
+        t = t.to(self.device)
+        t1 = t1.to(self.device)
 
-        B, T = frames.shape[:2]
-        if T < 2:
-            return torch.zeros(B, 0, device=self.device), {
-                'photometric_loss_mean': 0.0,
-                'fb_consistency_mean': 0.0,
-                'tv_mean': 0.0,
-                'total_loss_mean': 0.0,
-                'reward_mean': 0.0,
+        p_loss, pinfo = self._photometric_multiscale(t, t1)
+        fb_loss, fbinfo = self._fb_consistency(t, t1)
+        tv_loss = self._tv(t, t1)
+
+        total = p_loss + self.fb_weight * fb_loss + self.tv_weight * tv_loss
+
+        if self.debug:
+            print(f"[RTC] Photo={p_loss.item():.6f}, FB={fb_loss.item():.6f}, TV={tv_loss.item():.6f}, Total={total.item():.6f}")
+
+        if self.reward_type == "reciprocal":
+            reward = 1.0 / (1.0 + total)
+        else:
+            reward = torch.exp(-self.alpha * total)
+
+        # -------- Auto-disable normalization for batch size = 1 --------
+        if reward.shape[0] == 1:
+            return reward, {
+                **pinfo,
+                **fbinfo,
+                "tv": tv_loss.item(),
+                "total_loss": total.item(),
+                "reward": reward.item()
             }
 
-        # Batch all transitions
-        frame_t = frames[:, :-1].contiguous()  # (B, T-1, C, H, W)
-        frame_t1 = frames[:, 1:].contiguous()
-        B_seq = B * (T - 1)
-        frame_t_flat = frame_t.view(B_seq, *frame_t.shape[2:])
-        frame_t1_flat = frame_t1.view(B_seq, *frame_t1.shape[2:])
+        # (Only used if batch size > 1)
+        if self.normalize_rewards:
+            rmin = reward.min()
+            rmax = reward.max()
+            reward = (reward - rmin) / (rmax - rmin + self.eps)
 
-        rewards_flat, info_flat = self.compute_reward(frame_t_flat, frame_t1_flat)
-
-        rewards = rewards_flat.view(B, T - 1)
-
-        # Aggregate info: values already mean per-batch; compute means across flat sequences
-        info = {
-            'photometric_loss_mean': info_flat['photometric_loss_mean'],
-            'fb_consistency_mean': info_flat['fb_consistency_mean'],
-            'tv_mean': info_flat['tv_mean'],
-            'total_loss_mean': info_flat['total_loss_mean'],
-            'reward_mean': rewards.mean().item(),
+        return reward, {
+            **pinfo,
+            **fbinfo,
+            "tv": tv_loss.mean().item(),
+            "total_loss": total.mean().item(),
+            "reward": reward.mean().item()
         }
+
+    @torch.no_grad()
+    def compute_sequence_reward(self, frames):
+        B, T = frames.shape[:2]
+
+        if T < 2:
+            return torch.zeros(B, 0), {}
+
+        t = frames[:, :-1].reshape(-1, *frames.shape[2:])
+        t1 = frames[:, 1:].reshape(-1, *frames.shape[2:])
+
+        rewards, info = self.compute_reward(t, t1)
+
+        rewards = rewards.reshape(B, T - 1)
+
         return rewards, info
 
 
-def load_temporal_consistency_reward_v2(device: str = 'cuda', **kwargs) -> TemporalConsistencyRewardV2:
+def load_temporal_consistency_reward_v2(device='cuda', **kwargs):
     return TemporalConsistencyRewardV2(device=device, **kwargs)

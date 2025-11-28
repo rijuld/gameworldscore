@@ -38,6 +38,8 @@ class RewardWeights:
     def normalize(self) -> 'RewardWeights':
         """Normalize weights to sum to 1."""
         total = self.rik + self.rtc + self.raq
+        if total == 0:
+            return RewardWeights(0.0, 0.0, 0.0)
         return RewardWeights(
             rik=self.rik / total,
             rtc=self.rtc / total,
@@ -187,21 +189,33 @@ class GameWorldScoreReward(nn.Module):
         
         import time
         
-        # Time RIK (batched) - removed unnecessary syncs for speed
+        # Time RIK (batched)
         rik_start = time.perf_counter()
-        rik_rewards, rik_info = self.rik.compute_sequence_reward(frames, actions)
+        if self.weights.rik > 0:
+            rik_rewards, rik_info = self.rik.compute_sequence_reward(frames, actions)
+        else:
+            rik_rewards = torch.zeros(frames.shape[0], frames.shape[1]-1, device=self.device)
+            rik_info = {}
         rik_time_total = time.perf_counter() - rik_start
         
-        # Time RTC (batched) - removed unnecessary syncs for speed
+        # Time RTC (batched)
         rtc_start = time.perf_counter()
-        rtc_rewards, rtc_info = self.rtc.compute_sequence_reward(frames)
+        if self.weights.rtc > 0:
+            rtc_rewards, rtc_info = self.rtc.compute_sequence_reward(frames)
+        else:
+            rtc_rewards = torch.zeros(frames.shape[0], frames.shape[1]-1, device=self.device)
+            rtc_info = {}
         rtc_time_total = time.perf_counter() - rtc_start
         
-        # Time RAQ (batched - note: RAQ is per-frame, so we need T rewards)
+        # Time RAQ (batched)
         raq_start = time.perf_counter()
-        raq_rewards_all, raq_info = self.raq.compute_sequence_reward(frames)
-        # RAQ is (B, T), but we need (B, T-1) to match transitions
-        raq_rewards = raq_rewards_all[:, 1:]  # Skip first frame (context)
+        if self.weights.raq > 0:
+            raq_rewards_all, raq_info = self.raq.compute_sequence_reward(frames)
+            # RAQ is (B, T), but we need (B, T-1) to match transitions
+            raq_rewards = raq_rewards_all[:, 1:]  # Skip first frame (context)
+        else:
+            raq_rewards = torch.zeros(frames.shape[0], frames.shape[1]-1, device=self.device)
+            raq_info = {}
         raq_time_total = time.perf_counter() - raq_start
         
         # Weighted combination: (B, T-1)

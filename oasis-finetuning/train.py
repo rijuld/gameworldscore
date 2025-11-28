@@ -217,6 +217,21 @@ def parse_args():
         help="Weight for RAQ (aesthetic quality) reward",
     )
     parser.add_argument(
+        "--no-rik",
+        action="store_true",
+        help="Disable RIK reward (sets weight to 0)",
+    )
+    parser.add_argument(
+        "--no-rtc",
+        action="store_true",
+        help="Disable RTC reward (sets weight to 0)",
+    )
+    parser.add_argument(
+        "--no-raq",
+        action="store_true",
+        help="Disable RAQ reward (sets weight to 0)",
+    )
+    parser.add_argument(
         "--require-vpt",
         action="store_true",
         default=True,
@@ -394,9 +409,9 @@ def main():
         log_ratio_clip=args.log_ratio_clip,
         grad_clip=args.grad_clip,
         reward_scale=args.reward_scale,
-        rik_weight=args.rik_weight,
-        rtc_weight=args.rtc_weight,
-        raq_weight=args.raq_weight,
+        rik_weight=0.0 if args.no_rik else args.rik_weight,
+        rtc_weight=0.0 if args.no_rtc else args.rtc_weight,
+        raq_weight=0.0 if args.no_raq else args.raq_weight,
         require_vpt=args.require_vpt and not args.no_require_vpt,
         use_kl_in_reward=not args.no_kl,
         kl_coeff=args.kl_coeff,

@@ -37,7 +37,7 @@ env_path = os.environ.get("RLVR_WORLD_PATH")
 if env_path:
     RLVR_PATH = Path(env_path)
 else:
-    # 2. Relative path
+    # 2. Relative path - point to verl repository directory
     RLVR_PATH = project_root / "RLVR-World" / "vid_wm" / "verl"
 
 if str(RLVR_PATH) not in sys.path:
@@ -47,8 +47,9 @@ try:
     if not RLVR_PATH.exists():
         raise ImportError(f"Path {RLVR_PATH} does not exist")
     
-    if not (RLVR_PATH / "verl").exists():
-        raise ImportError(f"Package directory {RLVR_PATH}/verl does not exist")
+    # Check if the verl Python package exists inside the verl repository
+    if not (RLVR_PATH / "verl" / "__init__.py").exists():
+        raise ImportError(f"Python package verl/__init__.py not found in {RLVR_PATH}")
 
     from verl import DataProto
     from verl.trainer.ppo import core_algos

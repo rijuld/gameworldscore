@@ -29,8 +29,9 @@ try:
     if not RLVR_PATH.exists():
         raise ImportError(f"Path {RLVR_PATH} does not exist")
     
-    if not (RLVR_PATH / "verl").exists():
-        raise ImportError(f"Package directory {RLVR_PATH}/verl does not exist")
+    # Check if the verl Python package exists inside the verl repository
+    if not (RLVR_PATH / "verl" / "__init__.py").exists():
+        raise ImportError(f"Python package verl/__init__.py not found in {RLVR_PATH}")
 
     import verl
     print("Successfully imported verl")

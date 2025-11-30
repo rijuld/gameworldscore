@@ -11,6 +11,7 @@ for diffusion model finetuning.
 import os
 import sys
 import time
+import math
 from pathlib import Path
 from typing import Dict, Optional, Any, Callable, Tuple, List
 from dataclasses import dataclass, field
@@ -293,11 +294,20 @@ class OasisGRPOTrainer:
             self.grad_scaler = None
         
         if self.config.total_training_steps > 0:
-            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer,
-                T_max=self.config.total_training_steps,
-                eta_min=self.config.learning_rate * 0.1,
-            )
+            # Use linear warmup + cosine decay for stability
+            warmup_steps = min(100, self.config.total_training_steps // 10)
+            
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    # Linear warmup from 0.1x to 1x LR
+                    return 0.1 + 0.9 * (step / warmup_steps)
+                else:
+                    # Cosine decay after warmup
+                    progress = (step - warmup_steps) / (self.config.total_training_steps - warmup_steps)
+                    return 0.1 + 0.9 * (1 + math.cos(math.pi * progress)) / 2
+            
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+            print(f"  LR schedule: {warmup_steps} warmup steps + cosine decay")
         else:
             self.scheduler = None
     
@@ -799,10 +809,16 @@ class OasisGRPOTrainer:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 
-                # Use verl's compute_policy_loss
+                # CRITICAL: Clamp log-ratio to prevent exp() overflow and gradient explosion
+                # log(ratio) = log_prob - old_log_prob, clamp to [-clip, +clip]
+                log_ratio = log_probs - mb_old_log_probs
+                clamped_log_ratio = torch.clamp(log_ratio, -self.config.log_ratio_clip, self.config.log_ratio_clip)
+                clamped_log_probs = mb_old_log_probs + clamped_log_ratio
+                
+                # Use verl's compute_policy_loss with clamped log probs
                 pg_loss, pg_clipfrac, ppo_kl, _ = core_algos.compute_policy_loss(
                     old_log_prob=mb_old_log_probs,
-                    log_prob=log_probs,
+                    log_prob=clamped_log_probs,
                     advantages=mb_advantages,
                     response_mask=mb_response_mask,
                     cliprange=self.config.clip_ratio,
@@ -918,6 +934,12 @@ class OasisGRPOTrainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+        
+        # Ensure all expected keys exist (even if all updates were skipped)
+        expected_keys = ['pg_loss', 'total_loss', 'grad_norm', 'clip_fraction', 'kl', 'kl_loss']
+        for key in expected_keys:
+            if key not in metrics:
+                metrics[key] = []
         
         result = {k: np.mean(v) if v else float('nan') for k, v in metrics.items()}
         result['update_success_rate'] = successful_updates / self.config.grpo_epochs
@@ -1085,11 +1107,16 @@ class OasisGRPOTrainer:
         else:
             progress_info = f"Step {self.global_step}"
         
+        # Handle case where update was skipped (NaN gradients)
+        loss_val = metrics.get('train/total_loss', float('nan'))
+        grad_val = metrics.get('train/grad_norm', float('nan'))
+        clip_val = metrics.get('train/clip_fraction', 0.0)
+        
         print(f"{progress_info} | "
               f"gen={gen_time:.2f}s, reward={reward_time:.2f}s, update={grpo_time:.2f}s | "
               f"Reward={reward_mean:.3f}±{reward_std:.3f} (RIK={rik_val:.3f}, RTC={rtc_val:.3f}, RAQ={raq_val:.3f}) | "
-              f"loss={metrics['train/total_loss']:.4f}, grad={metrics['train/grad_norm']:.4f}, "
-              f"clip={metrics.get('train/clip_fraction', 0.0):.2%}, adv+={adv_info.get('advantage_pos_pct', 50.0):.0f}%",
+              f"loss={loss_val:.4f}, grad={grad_val:.4f}, "
+              f"clip={clip_val:.2%}, adv+={adv_info.get('advantage_pos_pct', 50.0):.0f}%",
               flush=True)
         
         # CRITICAL FIX: Step scheduler once per training step (not per epoch)

@@ -175,3 +175,4 @@ Or better: separate `kl_compute_freq` for reward vs. logging purposes.
 
 **Conclusion**: The core GRPO algorithm is correctly implemented, but the KL penalty feature (when `use_kl_in_reward=True`) is incomplete. The implementation will work correctly for GRPO without KL penalty, but if KL penalty is desired, it needs to be fixed as described above.
 
+

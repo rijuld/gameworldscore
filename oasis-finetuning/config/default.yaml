@@ -23,8 +23,8 @@ reward:
   require_vpt: true
   # GameWorldScore component weights
   rik_weight: 1.0           # Inverse Kinematics (action fidelity)
-  rtc_weight: 1.0           # Temporal Consistency (CLIP similarity)
-  raq_weight: 1.0           # Aesthetic Quality (LAION aesthetic)
+  rtc_weight: 0           # Temporal Consistency (CLIP similarity)
+  raq_weight: 0           # Aesthetic Quality (LAION aesthetic)
   use_motion_smoothness: true
   add_reward_noise: true    # Add small noise to break reward ties
 
@@ -47,9 +47,9 @@ data:
 training:
   total_epochs: 10
   total_training_steps: 10000
-  learning_rate: 1.0e-4     # Higher LR for DiT models
+  learning_rate: 1.0e-5     # Reduced - 1e-4 caused gradient explosion
   weight_decay: 0.01
-  grad_clip: 1.0
+  grad_clip: 0.5            # Stricter clipping to prevent explosion
   device: "cuda"
 
 # -----------------------------------------------------------------------------
@@ -64,7 +64,7 @@ grpo:
   clip_ratio: 0.2
   log_ratio_clip: 2.0       # Clamp log(ratio) to prevent exp() overflow
   entropy_coeff: 0.001
-  reward_scale: 100.0       # Scale rewards for strong GRPO signal
+  reward_scale: 10.0        # Reduced from 100 - was causing gradient explosion
   adv_estimator: "grpo"     # grpo, reinforce_plus_plus, or gae
 
 # -----------------------------------------------------------------------------

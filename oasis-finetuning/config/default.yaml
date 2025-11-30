@@ -97,7 +97,7 @@ checkpoint:
   save_freq: 100
   test_freq: 50
   checkpoint_dir: "checkpoints/oasis_grpo"
-  auto_resume: true         # Automatically resume from latest checkpoint
+  auto_resume: false         # Automatically resume from latest checkpoint
 
 # -----------------------------------------------------------------------------
 # Video Saving

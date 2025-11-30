@@ -588,6 +588,11 @@ class OasisGRPOTrainer:
             if reward_std > 0:
                 noise = torch.randn_like(scaled_rewards) * 0.01 * reward_std
                 scaled_rewards = scaled_rewards + noise
+            else:
+                # FIXED: When reward variance is zero, add small fixed noise to break ties
+                # This prevents complete training collapse when all samples get same reward
+                noise = torch.randn_like(scaled_rewards) * 0.01 * scaled_rewards.abs().mean().clamp(min=0.01)
+                scaled_rewards = scaled_rewards + noise
         
         # Create response mask if not provided (all ones)
         if response_mask is None:
@@ -781,6 +786,8 @@ class OasisGRPOTrainer:
                           f"Mean: {ratio.mean().item():.3f}")
                     print(f"  [DEBUG Adv Stats] Range: [{mb_advantages.min().item():.3f}, {mb_advantages.max().item():.3f}] | "
                           f"Mean: {mb_advantages.mean().item():.3f}")
+                    print(f"  [DEBUG LogProbs] Range: [{log_probs.min().item():.3f}, {log_probs.max().item():.3f}] | "
+                          f"Mean: {log_probs.mean().item():.3f}")
                 
                 # Entropy loss (simple proxy)
                 entropy_proxy = -log_probs.mean()
@@ -802,6 +809,12 @@ class OasisGRPOTrainer:
                 if torch.isnan(total_loss) or torch.isinf(total_loss):
                     print(f"  WARNING: NaN/Inf loss detected (pg={pg_loss.item():.4f}, "
                           f"entropy={entropy_loss.item():.4f}, kl={kl_loss.item():.4f}), skipping backward")
+                    self.optimizer.zero_grad()
+                    continue
+
+                # KL Cutoff (Fix 11): Skip update if KL is too high
+                if ppo_kl > self.config.kl_target * 1.5:
+                    print(f"  WARNING: High KL divergence ({ppo_kl:.4f} > {self.config.kl_target * 1.5:.4f}), skipping micro-batch to prevent drift")
                     self.optimizer.zero_grad()
                     continue
                 
@@ -883,6 +896,15 @@ class OasisGRPOTrainer:
             metrics['clip_fraction'].append(epoch_pg_clipfrac / num_micro_batches)
             metrics['kl'].append(epoch_ppo_kl / num_micro_batches)
             metrics['kl_loss'].append(epoch_kl_loss / num_micro_batches)
+            
+            # FIXED: Check for training collapse (zero gradients)
+            if isinstance(grad_norm, torch.Tensor):
+                grad_norm_val = grad_norm.item()
+            else:
+                grad_norm_val = grad_norm
+            if grad_norm_val < 1e-8:
+                print(f"  WARNING: Near-zero gradient norm ({grad_norm_val:.2e}). Training may have collapsed.")
+                print(f"  Consider: 1) Reducing learning rate, 2) Checking reward variance, 3) Restarting from checkpoint")
         
         # Clear cached latents to free memory (if they were created)
         if self.config.cache_encoded_frames:
@@ -1207,13 +1229,64 @@ class OasisGRPOTrainer:
         
         # Save checkpoint (this can be slow for large models)
         checkpoint_path = os.path.join(path, 'checkpoint.pt')
-        torch.save({
+        checkpoint = {
             'model_state_dict': self.policy.dit.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'global_step': self.global_step,
             'config': self.config.__dict__,
-        }, checkpoint_path)
+        }
+        
+        # Save scheduler state if it exists
+        if self.scheduler is not None:
+            checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
+        
+        # Save gradient scaler state if it exists
+        if self.grad_scaler is not None:
+            checkpoint['grad_scaler_state_dict'] = self.grad_scaler.state_dict()
+        
+        torch.save(checkpoint, checkpoint_path)
         print(f"\nSaved checkpoint to {path}", flush=True)
+    
+    def load_checkpoint(self, checkpoint_path: str):
+        """
+        Load checkpoint from file.
+        
+        Args:
+            checkpoint_path: Path to checkpoint file or directory containing checkpoint.pt
+        """
+        # Handle both file path and directory path
+        if os.path.isdir(checkpoint_path):
+            checkpoint_path = os.path.join(checkpoint_path, 'checkpoint.pt')
+        
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        
+        print(f"\nLoading checkpoint from: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        
+        # Load model state
+        self.policy.dit.load_state_dict(checkpoint['model_state_dict'])
+        print(f"  ✓ Loaded model state")
+        
+        # Load optimizer state
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print(f"  ✓ Loaded optimizer state")
+        
+        # Load global step
+        self.global_step = checkpoint.get('global_step', 0)
+        print(f"  ✓ Resuming from step {self.global_step}")
+        
+        # Load scheduler state if it exists
+        if 'scheduler_state_dict' in checkpoint and self.scheduler is not None:
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            print(f"  ✓ Loaded scheduler state")
+        
+        # Load gradient scaler state if it exists
+        if 'grad_scaler_state_dict' in checkpoint and self.grad_scaler is not None:
+            self.grad_scaler.load_state_dict(checkpoint['grad_scaler_state_dict'])
+            print(f"  ✓ Loaded gradient scaler state")
+        
+        print(f"  Successfully loaded checkpoint from step {self.global_step}")
 
 def create_oasis_grpo_trainer(config_path: str = None, **overrides):
     """

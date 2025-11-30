@@ -49,9 +49,9 @@ data:
 training:
   total_epochs: 10
   total_training_steps: 10000
-  learning_rate: 1.0e-5     # Reduced - 1e-4 caused gradient explosion
+  learning_rate: 5.0e-6     # FIXED: Further reduced to prevent gradient explosion
   weight_decay: 0.01
-  grad_clip: 0.5            # Stricter clipping to prevent explosion
+  grad_clip: 0.1            # FIXED: Much stricter clipping (was 0.5) to prevent explosions
   device: "cuda"
 
 # -----------------------------------------------------------------------------
@@ -64,9 +64,9 @@ grpo:
   gamma: 0.99
   lam: 0.95
   clip_ratio: 0.2
-  log_ratio_clip: 2.0       # Clamp log(ratio) to prevent exp() overflow
+  log_ratio_clip: 1.0       # FIXED: Tighter clamp (was 2.0) to prevent extreme ratios
   entropy_coeff: 0.001
-  reward_scale: 10.0        # Reduced from 100 - was causing gradient explosion
+  reward_scale: 5.0         # FIXED: Reduced (was 10.0) to prevent gradient explosion
   adv_estimator: "grpo"     # grpo, reinforce_plus_plus, or gae
 
 # -----------------------------------------------------------------------------
@@ -74,7 +74,7 @@ grpo:
 # -----------------------------------------------------------------------------
 kl:
   use_kl_in_reward: true
-  kl_coeff: 0.01
+  kl_coeff: 0.05            # FIXED: Increased (was 0.005) to prevent policy drift
   kl_target: 0.1
   kl_compute_freq: 5        # Compute KL every N steps
 

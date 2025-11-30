@@ -19,5 +19,9 @@ conda activate my_new_env
 cd ~/../../scratch/rd3629/RL-Project/oasis-finetuning
 
 # Run training
-python train.py
+# Option 1: Resume from specific checkpoint (recommended - use step 200 or earlier)
+python train.py --resume-from checkpoints/oasis_grpo/step_200
+
+# Option 2: Start fresh (comment out Option 1 and uncomment this)
+# python train.py
 "

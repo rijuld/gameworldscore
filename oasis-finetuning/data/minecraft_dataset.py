@@ -284,6 +284,16 @@ class ScreenshotsDataset(Dataset):
         """Load and preprocess a single image."""
         image = read_image(str(image_path))  # (C, H, W) uint8
         
+        # Some screenshots may be RGBA (4 channels) or grayscale (1 channel).
+        # Torchvision augmentations we use expect 1 or 3 channels, so
+        # normalize everything to 3-channel RGB.
+        if image.shape[0] == 4:
+            # Drop alpha channel: (4, H, W) -> (3, H, W)
+            image = image[:3, ...]
+        elif image.shape[0] == 1:
+            # Grayscale to RGB: (1, H, W) -> (3, H, W)
+            image = image.expand(3, -1, -1)
+        
         # Resize to target size
         image = resize(image, self.frame_size)
         

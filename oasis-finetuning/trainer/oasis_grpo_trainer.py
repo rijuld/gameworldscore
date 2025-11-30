@@ -842,7 +842,22 @@ class OasisGRPOTrainer:
             
             # Optimization step (after accumulating gradients from all micro-batches)
             # Optimization step (after accumulating gradients from all micro-batches)
+            # Only step if we actually computed gradients (at least one micro-batch was not skipped)
             if hasattr(self, 'grad_scaler') and self.grad_scaler is not None:
+                # If no valid gradients were computed (all micro-batches skipped), 
+                # we must NOT call unscale_ or step, as it will crash the scaler.
+                # We check if any backward pass happened by checking if params have .grad
+                has_grads = False
+                for p in self.policy.get_trainable_parameters():
+                    if p.grad is not None:
+                        has_grads = True
+                        break
+                
+                if not has_grads:
+                    print("  WARNING: No valid gradients computed (all micro-batches skipped). Skipping optimizer step.")
+                    self.optimizer.zero_grad()
+                    continue
+
                 # Unscale gradients first
                 self.grad_scaler.unscale_(self.optimizer)
                 
@@ -866,6 +881,18 @@ class OasisGRPOTrainer:
                 self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
             else:
+                # Check if we have any gradients
+                has_grads = False
+                for p in self.policy.get_trainable_parameters():
+                    if p.grad is not None:
+                        has_grads = True
+                        break
+                
+                if not has_grads:
+                    print("  WARNING: No valid gradients computed (all micro-batches skipped). Skipping optimizer step.")
+                    self.optimizer.zero_grad()
+                    continue
+
                 # Standard gradient clipping
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.get_trainable_parameters(),

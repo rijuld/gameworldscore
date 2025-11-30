@@ -9,7 +9,7 @@
 # Model Paths
 # -----------------------------------------------------------------------------
 model:
-  ddim_steps: 6             # DDIM denoising steps (default 10, reduce for speed)
+  ddim_steps: 4             # DDIM denoising steps (default 10, reduce for speed)
   oasis_ckpt: "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/oasis500m.safetensors"
   vae_ckpt: "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/vit-l-20.safetensors"
   dit_type: "DiT-S/2"
@@ -85,7 +85,7 @@ memory:
   use_gradient_checkpointing: true
   use_mixed_precision: true
   offload_reward_to_cpu: false
-  offload_ref_policy_to_cpu: true   # Saves ~14GB GPU memory
+  offload_ref_policy_to_cpu: false   # Saves ~14GB GPU memory
   cache_encoded_frames: false       # DISABLED: breaks gradient flow
   use_torch_compile: false
   enable_tf32: true

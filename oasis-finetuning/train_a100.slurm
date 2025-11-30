@@ -13,20 +13,10 @@
 # Create logs directory if it doesn't exist
 mkdir -p ./logs
 
-# Run training inside Singularity container
-singularity exec --bind /scratch --nv \
-    --overlay /scratch/rd3629/overlay-25GB-500K.ext3:ro \
-    /scratch/rd3629/cuda12.8.1-cudnn9.8.0-ubuntu24.04.2.sif \
-    /bin/bash -c "
-source /ext3/env.sh
-conda activate bdml_env
+conda activate my_new_env
 
 # Navigate to project directory
-cd /scratch/rd3629/oasis-finetuning
-
-# Set environment variables for better GPU utilization
-export CUDA_VISIBLE_DEVICES=0
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+cd ~/../../scratch/rd3629/RL-Project/oasis-finetuning
 
 # Run training
 python train.py

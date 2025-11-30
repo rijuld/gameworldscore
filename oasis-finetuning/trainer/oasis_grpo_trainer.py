@@ -201,6 +201,13 @@ class OasisGRPOTrainer:
             
             self.ref_policy_device = ref_device
             print(f"  Reference policy on: {ref_device}")
+            
+            if ref_device == "cpu" and self.config.use_kl_in_reward:
+                print(f"\n{'!'*80}")
+                print("WARNING: Reference policy is on CPU while use_kl_in_reward is True.")
+                print("This will cause EXTREME slowdowns as the reference model runs on CPU every step.")
+                print("Recommended: Set offload_ref_policy_to_cpu: false in config if GPU memory allows.")
+                print(f"{'!'*80}\n")
         else:
             self.ref_policy = None
             self.ref_policy_device = None
@@ -466,7 +473,7 @@ class OasisGRPOTrainer:
                         action_idx = t - T_prompt
                         action = actions_for_ref[:, action_idx:action_idx+1]
                         
-                        ref_log_prob = self.ref_policy.compute_log_prob(context, action, target)
+                        ref_log_prob = self.ref_policy.compute_log_prob(context, action, target, noise=step_noise)
                         ref_log_probs_list.append(ref_log_prob.detach())
                         
                         del context, target, action
@@ -505,33 +512,7 @@ class OasisGRPOTrainer:
         if actions_return.device != self.device:
             actions_return = actions_return.to(self.device)
             
-        # Generate noise for future updates (to ensure consistency)
-        # We need noise for each generated frame
-        # Shape: (B*G, num_gen, C, H/patch, W/patch)
-        # We can just generate it now and store it
-        # Note: We need to know the latent shape. 
-        # We can infer it from the log_probs computation or just generate it matching latents shape
-        # Since we deleted latents, we'll recreate the shape info
-        latent_h = all_frames.shape[-2] // self.policy.vae.patch_size
-        latent_w = all_frames.shape[-1] // self.policy.vae.patch_size
-        latent_c = 4 # Standard for Oasis VAE, but better to get from config if possible. 
-                     # However, we can just use torch.randn like in compute_log_prob
-        
-        # Actually, we should have captured the noise used during compute_log_prob above!
-        # But compute_log_prob generated it internally.
-        # To fix this properly without changing the flow too much:
-        # We will generate the noise HERE, and we should have passed it to compute_log_prob above.
-        # Since we didn't (in the loop above), the log_probs calculated above used random noise.
-        # This is fine for the "old_log_probs" as long as we save THAT noise and use it for "new_log_probs".
-        # WAIT: If we didn't pass noise above, compute_log_prob generated random noise and threw it away.
-        # We CANNOT recover that noise.
-        # FIX: We must generate noise BEFORE the loop above and pass it in.
-        
-        # RE-IMPLEMENTING THE LOOP WITH PRE-GENERATED NOISE
-        # (This replaces the loop logic in the original code, but since I'm editing the end of the function,
-        # I need to be careful. I will rewrite the loop part in a separate chunk or assume I can't change it easily here?
-        # No, I should rewrite the whole _generate_rollouts method or a large chunk of it.
-        # Let's rewrite the loop part in _generate_rollouts using a larger chunk.)
+        # Noise is now correctly pre-generated and passed to compute_log_prob above.
         
         return {
             'generated_frames': None,  # Don't keep generated_frames in memory

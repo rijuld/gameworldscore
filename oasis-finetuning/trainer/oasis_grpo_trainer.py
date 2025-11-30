@@ -110,7 +110,7 @@ class OasisGRPOConfig:
     max_gen_frames: int = 2  # Reduced from 4 to 2 for memory optimization
     
     # GRPO hyperparameters (following RLVR-World)
-    learning_rate: float = 1e-5  # Increased from 5e-7 for visible learning
+    learning_rate: float = 1e-4  # Increased for visible learning (diffusion models need higher LR)
     gamma: float = 0.99
     lam: float = 0.95
     clip_ratio: float = 0.2
@@ -204,6 +204,11 @@ class OasisGRPOTrainer:
         if self.config.update_micro_batch_size != self.config.group_size:
             print(f"⚠️  OVERRIDE: Setting update_micro_batch_size from {self.config.update_micro_batch_size} to {self.config.group_size}")
             self.config.update_micro_batch_size = self.config.group_size
+        
+        # FORCE OVERRIDE: Ensure grpo_epochs is 1 for efficiency
+        if self.config.grpo_epochs != 1:
+            print(f"⚠️  OVERRIDE: Setting grpo_epochs from {self.config.grpo_epochs} to 1")
+            self.config.grpo_epochs = 1
         
         # Enable TF32 for faster matrix multiplications on Ampere+ GPUs
         if config.enable_tf32 and torch.cuda.is_available():
@@ -975,6 +980,13 @@ class OasisGRPOTrainer:
                     continue
                 
                 self.optimizer.step()
+            
+            # DEBUG: Track weight changes after optimizer step
+            if self.global_step % 10 == 0 and epoch == 0:
+                with torch.no_grad():
+                    param_sample = next(iter(self.policy.get_trainable_parameters()))
+                    print(f"  [WEIGHT CHECK] After optimizer.step() - sample param mean: {param_sample.mean().item():.8f}, "
+                          f"std: {param_sample.std().item():.6f}, lr: {self.optimizer.param_groups[0]['lr']:.2e}")
             
             successful_updates += 1
             

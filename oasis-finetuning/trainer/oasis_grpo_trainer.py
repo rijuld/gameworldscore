@@ -812,11 +812,7 @@ class OasisGRPOTrainer:
                     self.optimizer.zero_grad()
                     continue
 
-                # KL Cutoff (Fix 11): Skip update if KL is too high
-                if ppo_kl > self.config.kl_target * 1.5:
-                    print(f"  WARNING: High KL divergence ({ppo_kl:.4f} > {self.config.kl_target * 1.5:.4f}), skipping micro-batch to prevent drift")
-                    self.optimizer.zero_grad()
-                    continue
+
                 
                 # Scale loss by number of micro-batches for gradient accumulation
                 total_loss = total_loss / num_micro_batches
@@ -932,6 +928,23 @@ class OasisGRPOTrainer:
             if grad_norm_val < 1e-8:
                 print(f"  WARNING: Near-zero gradient norm ({grad_norm_val:.2e}). Training may have collapsed.")
                 print(f"  Consider: 1) Reducing learning rate, 2) Checking reward variance, 3) Restarting from checkpoint")
+        
+        # Adaptive KL Penalty (Fix 15)
+        # Adjust kl_coeff based on average KL divergence of the batch
+        if self.config.use_kl_in_reward and len(metrics['kl']) > 0:
+            avg_kl = sum(metrics['kl']) / len(metrics['kl'])
+            target_kl = self.config.kl_target
+            
+            if avg_kl > target_kl * 1.5:
+                # KL too high, increase penalty
+                self.config.kl_coeff *= 1.5
+                self.config.kl_coeff = min(self.config.kl_coeff, 10.0) # Cap at 10.0
+                print(f"  [Adaptive KL] High KL ({avg_kl:.4f}), increasing coeff to {self.config.kl_coeff:.4f}")
+            elif avg_kl < target_kl / 1.5:
+                # KL too low, decrease penalty
+                self.config.kl_coeff /= 1.5
+                self.config.kl_coeff = max(self.config.kl_coeff, 0.001) # Floor at 0.001
+                print(f"  [Adaptive KL] Low KL ({avg_kl:.4f}), decreasing coeff to {self.config.kl_coeff:.4f}")
         
         # Clear cached latents to free memory (if they were created)
         if self.config.cache_encoded_frames:

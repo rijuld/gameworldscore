@@ -118,21 +118,16 @@ class OasisGRPOTrainer:
             print(f"⚠️  OVERRIDE: Setting update_micro_batch_size from {self.config.update_micro_batch_size} to {self.config.group_size}")
             self.config.update_micro_batch_size = self.config.group_size
         
-        # Performance optimizations
-        if torch.cuda.is_available():
-            # Enable TF32 for faster matrix multiplications on Ampere+ GPUs
-            if config.enable_tf32:
-                torch.backends.cuda.matmul.allow_tf32 = True
-                torch.backends.cudnn.allow_tf32 = True
-                print("  Enabled TensorFloat-32 (TF32) for faster training")
-            
-            # Enable cuDNN benchmark for auto-tuned convolutions
-            if config.cudnn_benchmark:
-                torch.backends.cudnn.benchmark = True
-                print("  Enabled cuDNN benchmark mode")
+        # FORCE OVERRIDE: Ensure grpo_epochs is 1 for efficiency
+        if self.config.grpo_epochs != 1:
+            print(f"⚠️  OVERRIDE: Setting grpo_epochs from {self.config.grpo_epochs} to 1")
+            self.config.grpo_epochs = 1
         
-        # Store non_blocking setting for tensor transfers
-        self.non_blocking = config.non_blocking
+        # Enable TF32 for faster matrix multiplications on Ampere+ GPUs
+        if config.enable_tf32 and torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            print("  Enabled TensorFloat-32 (TF32) for faster training")
         
         # Initialize components
         self._init_policy()
@@ -162,12 +157,6 @@ class OasisGRPOTrainer:
             device=self.config.device,
             ddim_steps=self.config.ddim_steps,
         )
-        
-        # Multi-GPU support: wrap DiT in DataParallel if multiple GPUs available
-        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            n_gpus = torch.cuda.device_count()
-            print(f"  Using {n_gpus} GPUs with DataParallel")
-            self.policy.dit = torch.nn.DataParallel(self.policy.dit)
         
         # Clear cache after loading model
         if torch.cuda.is_available():
@@ -286,8 +275,6 @@ class OasisGRPOTrainer:
                 frame_size=self.config.frame_size,
                 split="train",
                 num_workers=self.config.dataloader_num_workers,
-                pin_memory=self.config.pin_memory,
-                prefetch_factor=self.config.prefetch_factor,
             )
         else:
             print(f"Warning: Data directory {data_dir} not found.")
@@ -361,13 +348,11 @@ class OasisGRPOTrainer:
         self.policy.eval_mode()
         
         # Disable gradient checkpointing during inference for speed
-        # Handle DataParallel wrapped models
-        dit_module = self.policy.dit.module if hasattr(self.policy.dit, 'module') else self.policy.dit
         if self.use_gradient_checkpointing:
-            if hasattr(dit_module, 'gradient_checkpointing_disable'):
-                dit_module.gradient_checkpointing_disable()
-            elif hasattr(dit_module, 'disable_gradient_checkpointing'):
-                dit_module.disable_gradient_checkpointing()
+            if hasattr(self.policy.dit, 'gradient_checkpointing_disable'):
+                self.policy.dit.gradient_checkpointing_disable()
+            elif hasattr(self.policy.dit, 'disable_gradient_checkpointing'):
+                self.policy.dit.disable_gradient_checkpointing()
         
         B = initial_frames.shape[0]
         G = self.config.group_size
@@ -693,13 +678,11 @@ class OasisGRPOTrainer:
         self.policy.train_mode()
         
         # Enable gradient checkpointing during training for memory efficiency
-        # Handle DataParallel wrapped models
-        dit_module = self.policy.dit.module if hasattr(self.policy.dit, 'module') else self.policy.dit
         if self.use_gradient_checkpointing:
-            if hasattr(dit_module, 'gradient_checkpointing_enable'):
-                dit_module.gradient_checkpointing_enable()
-            elif hasattr(dit_module, 'enable_gradient_checkpointing'):
-                dit_module.enable_gradient_checkpointing()
+            if hasattr(self.policy.dit, 'gradient_checkpointing_enable'):
+                self.policy.dit.gradient_checkpointing_enable()
+            elif hasattr(self.policy.dit, 'enable_gradient_checkpointing'):
+                self.policy.dit.enable_gradient_checkpointing()
         
         B = all_frames.shape[0]
         T_prompt = self.config.n_prompt_frames
@@ -976,16 +959,15 @@ class OasisGRPOTrainer:
             torch.cuda.synchronize()
         gc.collect()
         
-        # Prepare inputs (use non_blocking for async transfers from pinned memory)
-        nb = self.non_blocking
+        # Prepare inputs
         if 'initial_frame' in batch:
-            initial_frames = batch['initial_frame'].to(self.device, non_blocking=nb)
+            initial_frames = batch['initial_frame'].to(self.device)
         else:
-            frames = batch['frames'].to(self.device, non_blocking=nb)
+            frames = batch['frames'].to(self.device)
             initial_frames = frames[:, :self.config.n_prompt_frames]
             del frames  # Free memory immediately
         
-        actions = batch['actions'].to(self.device, non_blocking=nb)
+        actions = batch['actions'].to(self.device)
         target_actions = actions[:, :self.config.max_gen_frames]
         
         # 1. Generate rollouts (with group repetition)

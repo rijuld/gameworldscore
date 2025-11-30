@@ -421,11 +421,9 @@ def create_minecraft_dataloader(
         else:
             raise ValueError(f"Could not detect dataset type in {data_dir}")
     
-    # Extract DataLoader-specific kwargs before passing to dataset
+    # Remove split from kwargs if present (we handle it explicitly)
     kwargs.pop('split', None)
     kwargs.pop('frame_size', None)
-    pin_memory = kwargs.pop('pin_memory', True)
-    prefetch_factor = kwargs.pop('prefetch_factor', 2)
     
     if dataset_type == "midas":
         dataset = MiDaSMinecraftDataset(
@@ -470,16 +468,12 @@ def create_minecraft_dataloader(
         
         return result
     
-    persistent_workers = num_workers > 0  # Keep workers alive between batches
-    
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=pin_memory,
-        prefetch_factor=prefetch_factor if num_workers > 0 else None,
-        persistent_workers=persistent_workers,
+        pin_memory=True,
         collate_fn=collate_fn,
     )
 

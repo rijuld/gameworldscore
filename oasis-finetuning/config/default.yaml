@@ -35,14 +35,12 @@ reward:
 data:
   data_dir: "Dataset/MiDaS-60_small"
   dataset_type: "auto"      # auto, video, or midas
-  train_batch_size: 4       # Maximized for 2 GPUs
+  train_batch_size: 1
   n_prompt_frames: 1
   max_gen_frames: 2         # Reduced for memory optimization
   frame_height: 360
   frame_width: 640
-  num_workers: 16           # Maximized for parallel data loading
-  pin_memory: true          # Faster CPU->GPU transfer
-  prefetch_factor: 4        # Prefetch batches
+  num_workers: 4
 
 # -----------------------------------------------------------------------------
 # Training Configuration
@@ -59,9 +57,9 @@ training:
 # GRPO Hyperparameters
 # -----------------------------------------------------------------------------
 grpo:
-  group_size: 8             # Increased for 2 GPUs (more rollouts = better advantage estimation)
+  group_size: 4             # Number of rollouts per prompt
   grpo_epochs: 3            # MUST be >1 for ratio to change within step
-  update_micro_batch_size: 8  # MUST equal group_size for balanced advantages
+  update_micro_batch_size: 4  # MUST equal group_size for balanced advantages
   gamma: 0.99
   lam: 0.95
   clip_ratio: 0.2
@@ -88,10 +86,8 @@ memory:
   offload_reward_to_cpu: false
   offload_ref_policy_to_cpu: true   # Saves ~14GB GPU memory
   cache_encoded_frames: false       # DISABLED: breaks gradient flow
-  use_torch_compile: true           # JIT compile for speed (may have startup cost)
-  enable_tf32: true                 # Fast TF32 on Ampere GPUs
-  cudnn_benchmark: true             # Auto-tune convolutions
-  non_blocking: true                # Async GPU transfers
+  use_torch_compile: false
+  enable_tf32: true
 
 # -----------------------------------------------------------------------------
 # Checkpointing

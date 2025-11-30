@@ -473,26 +473,6 @@ class OasisGRPOTrainer:
                     ref_log_probs = torch.stack(ref_log_probs_list, dim=1)
                     
                     # Immediately move ref_log_probs back to GPU and clean up CPU copies
-                    if self.ref_policy_device == "cpu":
-                        ref_log_probs = ref_log_probs.to(self.device)
-                        del all_frames_for_ref, actions_for_ref, ref_latents
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                    else:
-                        del ref_latents
-                    
-                    del ref_log_probs_list
-                else:
-                    # Skip KL computation this step
-                    del latents
-                    ref_log_probs = None
-            else:
-                del latents
-        
-        # Create group indices (on GPU)
-        # [0, 0, 0, 0, 1, 1, 1, 1, ...]
-        indices = torch.arange(B, device=self.device).repeat_interleave(G)
-        
         # Ensure all return values are on GPU
         if all_frames.device != self.device:
             all_frames = all_frames.to(self.device)
@@ -727,33 +707,7 @@ class OasisGRPOTrainer:
                     # Get noise for this step
                     step_noise = mb_noise[:, action_idx:action_idx+1]
 
-                    # DEBUG: Verify noise is being used correctly (only on first step of first epoch/mb)
-                    if epoch == 0 and mb_idx == 0 and t == T_prompt and self.global_step % 10 == 0:
-                        print(f"  [NOISE CHECK] step_noise shape: {step_noise.shape}, sum: {step_noise.sum().item():.6f}")
-                        print(f"  [NOISE CHECK] old_log_prob for this sample: {mb_old_log_probs[0, action_idx].item():.6f}")
-                        
-                        # Compute with provided noise
-                        with torch.no_grad():
-                            log_prob_with_noise = self.policy.compute_log_prob(context, action, target, noise=step_noise)
-                            log_prob_without_noise = self.policy.compute_log_prob(context, action, target, noise=None)
-                        
-                        print(f"  [NOISE CHECK] log_prob WITH noise: {log_prob_with_noise[0].item():.6f}")
-                        print(f"  [NOISE CHECK] log_prob WITHOUT noise: {log_prob_without_noise[0].item():.6f}")
-                        print(f"  [NOISE CHECK] Difference (with vs without): {abs(log_prob_with_noise[0].item() - log_prob_without_noise[0].item()):.6f}")
-                        
-                        # Critical: Does new log_prob match old log_prob when using same noise?
-                        diff_from_old = abs(log_prob_with_noise[0].item() - mb_old_log_probs[0, action_idx].item())
-                        print(f"  [NOISE CHECK] Difference (new vs old): {diff_from_old:.6f}")
-                        
-                        if abs(log_prob_with_noise[0].item() - log_prob_without_noise[0].item()) < 1e-6:
-                            print("  [NOISE CHECK] ❌ NOISE IS NOT BEING USED!")
-                        else:
-                            print("  [NOISE CHECK] ✅ Noise is being used correctly")
-                        
-                        if diff_from_old < 1e-4:
-                            print("  [NOISE CHECK] ⚠️ new_log_prob ≈ old_log_prob (policy unchanged OR consistent noise)")
-                        else:
-                            print(f"  [NOISE CHECK] 🔄 Policy has changed: diff={diff_from_old:.6f}")
+
 
                     # Use mixed precision for log prob computation
                     if self.config.use_mixed_precision and self.device == "cuda":
@@ -869,10 +823,12 @@ class OasisGRPOTrainer:
                 
                 # Check for NaN/Inf gradients
                 if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-                    print(f"  WARNING: NaN/Inf gradient detected (norm={grad_norm}), skipping update")
+                    print(f"  WARNING: NaN/Inf gradient detected (norm={grad_norm}), skipping optimizer step but updating scaler")
                     self.optimizer.zero_grad()
-                    # IMPORTANT: If we skip step(), we must NOT call update() on scaler
-                    # or it might mess up internal state. Just continue to next epoch.
+                    # CRITICAL FIX: We MUST call update() even if we skip step(), 
+                    # otherwise the scaler thinks we're still in the same iteration 
+                    # and throws "unscale_() has already been called" next time.
+                    self.grad_scaler.update()
                     continue
                 
                 # Step optimizer and update scaler

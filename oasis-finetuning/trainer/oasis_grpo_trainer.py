@@ -113,15 +113,7 @@ class OasisGRPOTrainer:
         # Print config values (loaded from YAML)
         print_config(config)
         
-        # FORCE OVERRIDE: Ensure micro_batch_size equals group_size for balanced gradients
-        if self.config.update_micro_batch_size != self.config.group_size:
-            print(f"⚠️  OVERRIDE: Setting update_micro_batch_size from {self.config.update_micro_batch_size} to {self.config.group_size}")
-            self.config.update_micro_batch_size = self.config.group_size
-        
-        # FORCE OVERRIDE: Ensure grpo_epochs is 1 for efficiency
-        if self.config.grpo_epochs != 1:
-            print(f"⚠️  OVERRIDE: Setting grpo_epochs from {self.config.grpo_epochs} to 1")
-            self.config.grpo_epochs = 1
+
         
         # Enable TF32 for faster matrix multiplications on Ampere+ GPUs
         if config.enable_tf32 and torch.cuda.is_available():
@@ -864,28 +856,36 @@ class OasisGRPOTrainer:
                     torch.cuda.empty_cache()
             
             # Optimization step (after accumulating gradients from all micro-batches)
+            # Optimization step (after accumulating gradients from all micro-batches)
             if hasattr(self, 'grad_scaler') and self.grad_scaler is not None:
+                # Unscale gradients first
                 self.grad_scaler.unscale_(self.optimizer)
+                
+                # Clip gradients (now unscaled)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.get_trainable_parameters(),
                     self.config.grad_clip,
                 )
                 
-                # Check for NaN gradients before optimizer step
+                # Check for NaN/Inf gradients
                 if torch.isnan(grad_norm) or torch.isinf(grad_norm):
                     print(f"  WARNING: NaN/Inf gradient detected (norm={grad_norm}), skipping update")
                     self.optimizer.zero_grad()
+                    # IMPORTANT: If we skip step(), we must NOT call update() on scaler
+                    # or it might mess up internal state. Just continue to next epoch.
                     continue
                 
+                # Step optimizer and update scaler
                 self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
             else:
+                # Standard gradient clipping
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.get_trainable_parameters(),
                     self.config.grad_clip,
                 )
                 
-                # Check for NaN gradients before optimizer step
+                # Check for NaN/Inf gradients
                 if torch.isnan(grad_norm) or torch.isinf(grad_norm):
                     print(f"  WARNING: NaN/Inf gradient detected (norm={grad_norm}), skipping update")
                     self.optimizer.zero_grad()
@@ -1119,14 +1119,21 @@ class OasisGRPOTrainer:
         
         self.global_step = 0
         
-        for epoch in range(self.config.total_epochs):
-            epoch_pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch + 1}")
+        # Create a single progress bar for total training steps
+        pbar = tqdm(total=self.config.total_training_steps, desc="Training Steps")
+        
+        # Cycle through dataloader indefinitely until max steps reached
+        epoch = 0
+        while self.global_step < self.config.total_training_steps:
+            epoch += 1
+            # print(f"\nStarting Epoch {epoch}") # Optional: reduce noise
             
-            for batch in epoch_pbar:
+            for batch in self.train_dataloader:
                 if self.global_step >= self.config.total_training_steps:
                     break
                 
-                metrics = self.train_step(batch, pbar=epoch_pbar)
+                # Update progress bar description with current status
+                metrics = self.train_step(batch, pbar=pbar)
                 
                 if self.logger is not None:
                     self.logger.log(metrics, step=self.global_step)
@@ -1138,8 +1145,10 @@ class OasisGRPOTrainer:
                     self.save_sample_video(batch)
                 
                 self.global_step += 1
-            
-            self.save_checkpoint()
+                pbar.update(1)
+        
+        pbar.close()
+        self.save_checkpoint()
 
     def save_sample_video(self, batch, suffix=""):
         """Save sample video."""

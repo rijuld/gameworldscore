@@ -386,7 +386,8 @@ class OasisPolicy(nn.Module):
         
         # Clamp to prevent extreme values
         # Widened range to [-100, 0] to avoid zero gradients for poor models
-        log_probs = torch.clamp(log_probs, min=-100.0, max=0.0)
+        # But clamp tighter to avoid explosion if needed
+        log_probs = torch.clamp(log_probs, min=-20.0, max=0.0)
         
         return log_probs
     

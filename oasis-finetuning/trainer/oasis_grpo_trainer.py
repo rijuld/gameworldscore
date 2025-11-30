@@ -102,7 +102,7 @@ class OasisGRPOConfig:
     total_epochs: int = 10
     total_training_steps: int = 10000
     train_batch_size: int = 1  # Number of unique prompts per step
-    group_size: int = 3  # Number of rollouts per prompt - optimized for memory-speed tradeoff
+    group_size: int = 8  # Number of rollouts per prompt - provides better variance for GRPO
     grpo_epochs: int = 1  # Number of update epochs per step - optimized for speed
     
     # Rollout settings
@@ -117,7 +117,7 @@ class OasisGRPOConfig:
     log_ratio_clip: float = 2.0  # Added back for compatibility
     entropy_coeff: float = 0.001
     grad_clip: float = 1.0
-    reward_scale: float = 10.0  # Scaled up for better learning signal
+    reward_scale: float = 100.0  # Provides strong signal for GRPO advantages
     
     # Memory optimization settings
     use_gradient_checkpointing: bool = True  # Enable gradient checkpointing to save memory
@@ -137,6 +137,9 @@ class OasisGRPOConfig:
     use_kl_in_reward: bool = True  # Enable KL divergence penalty (ref policy on CPU to save memory)
     kl_coeff: float = 0.01
     kl_target: float = 0.1
+    
+    # Reward noise settings
+    add_reward_noise: bool = True  # Add small noise to break reward ties for GRPO
     
     # Reward weights (GameWorldScore)
     rik_weight: float = 1.0
@@ -662,6 +665,14 @@ class OasisGRPOTrainer:
         # Scale rewards
         scaled_rewards = rewards * self.config.reward_scale
         
+        # Add tiny noise to break ties and ensure variance (Fix 3)
+        # This helps GRPO when rewards are very similar
+        if self.config.add_reward_noise:
+            reward_std = scaled_rewards.std()
+            if reward_std > 0:
+                noise = torch.randn_like(scaled_rewards) * 0.01 * reward_std
+                scaled_rewards = scaled_rewards + noise
+        
         # Create response mask if not provided (all ones)
         if response_mask is None:
             response_mask = torch.ones_like(rewards)
@@ -676,10 +687,26 @@ class OasisGRPOTrainer:
             index=indices_np,
         )
         
+        # Debug logging for advantages (Fix 4)
+        pos_adv = (advantages > 0).float().mean().item() * 100
+        neg_adv = (advantages < 0).float().mean().item() * 100
+        zero_adv = (advantages == 0).float().mean().item() * 100
+        
+        if self.global_step % 10 == 0:  # Log every 10 steps to avoid spam
+            print(f"  [DEBUG Advantages] "
+                  f"Positive: {pos_adv:.1f}% | Negative: {neg_adv:.1f}% | Zero: {zero_adv:.1f}% | "
+                  f"Range: [{advantages.min().item():.3f}, {advantages.max().item():.3f}] | "
+                  f"Mean: {advantages.mean().item():.3f} ± {advantages.std().item():.3f}")
+            print(f"  [DEBUG Rewards] "
+                  f"Range: [{rewards.min().item():.3f}, {rewards.max().item():.3f}] | "
+                  f"Mean: {rewards.mean().item():.3f} ± {rewards.std().item():.3f}")
+        
         info = {
             'advantage_mean': advantages.mean().item(),
             'advantage_std': advantages.std().item(),
+            'advantage_pos_pct': pos_adv,
             'reward_mean': rewards.mean().item(),
+            'reward_std': rewards.std().item(),
         }
         
         return advantages, info
@@ -821,6 +848,15 @@ class OasisGRPOTrainer:
                     cliprange=self.config.clip_ratio,
                     loss_agg_mode="token-mean"
                 )
+                
+                # Debug logging for loss components (Fix 5)
+                if self.global_step % 10 == 0 and mb_idx == 0:  # Log every 10 steps, first micro-batch only
+                    ratio = torch.exp(log_probs - mb_old_log_probs)
+                    print(f"  [DEBUG Loss] PG: {pg_loss.item():.4f} | Clip%: {pg_clipfrac:.2%} | KL: {ppo_kl:.4f}")
+                    print(f"  [DEBUG Ratio] Range: [{ratio.min().item():.3f}, {ratio.max().item():.3f}] | "
+                          f"Mean: {ratio.mean().item():.3f}")
+                    print(f"  [DEBUG Adv Stats] Range: [{mb_advantages.min().item():.3f}, {mb_advantages.max().item():.3f}] | "
+                          f"Mean: {mb_advantages.mean().item():.3f}")
                 
                 # Entropy loss (simple proxy)
                 entropy_proxy = -log_probs.mean()
@@ -1084,8 +1120,9 @@ class OasisGRPOTrainer:
         
         print(f"{progress_info} | "
               f"gen={gen_time:.2f}s, reward={reward_time:.2f}s, update={grpo_time:.2f}s | "
-              f"Reward={reward_mean:.3f} (RIK={rik_val:.3f}, RTC={rtc_val:.3f}, RAQ={raq_val:.3f}) | "
-              f"loss={metrics['train/total_loss']:.4f}, grad={metrics['train/grad_norm']:.4f}",
+              f"Reward={reward_mean:.3f}±{reward_std:.3f} (RIK={rik_val:.3f}, RTC={rtc_val:.3f}, RAQ={raq_val:.3f}) | "
+              f"loss={metrics['train/total_loss']:.4f}, grad={metrics['train/grad_norm']:.4f}, "
+              f"clip={metrics.get('train/clip_fraction', 0.0):.2%}, adv+={adv_info.get('advantage_pos_pct', 50.0):.0f}%",
               flush=True)
         
         # CRITICAL FIX: Step scheduler once per training step (not per epoch)

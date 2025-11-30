@@ -233,8 +233,8 @@ class RealityGroundingReward(nn.Module):
         B = frames.shape[0]
         
         # Apply Sobel filters
-        edges_x = F.conv2d(frames, self.sobel_x, padding=1, groups=3)
-        edges_y = F.conv2d(frames, self.sobel_y, padding=1, groups=3)
+        edges_x = F.conv2d(frames, self.sobel_x.to(frames.device), padding=1, groups=3)
+        edges_y = F.conv2d(frames, self.sobel_y.to(frames.device), padding=1, groups=3)
         
         # Edge magnitude
         edge_magnitude = torch.sqrt(edges_x ** 2 + edges_y ** 2 + 1e-8)
@@ -270,7 +270,7 @@ class RealityGroundingReward(nn.Module):
         frames_flat = frames.view(B, 3, -1).permute(0, 2, 1)  # (B, N, 3)
         
         # Distance to nearest Minecraft palette color
-        palette = self.minecraft_palette.unsqueeze(0).unsqueeze(0)  # (1, 1, 10, 3)
+        palette = self.minecraft_palette.to(frames.device).unsqueeze(0).unsqueeze(0)  # (1, 1, 10, 3)
         frames_exp = frames_flat.unsqueeze(2)  # (B, N, 1, 3)
         
         color_distances = ((frames_exp - palette) ** 2).sum(dim=-1)  # (B, N, 10)
@@ -330,8 +330,8 @@ class RealityGroundingReward(nn.Module):
         cy, cx = H // 2, W // 2
         
         # Create frequency bands
-        y_coords = torch.arange(H, device=self.device).view(-1, 1) - cy
-        x_coords = torch.arange(W, device=self.device).view(1, -1) - cx
+        y_coords = torch.arange(H, device=frames.device).view(-1, 1) - cy
+        x_coords = torch.arange(W, device=frames.device).view(1, -1) - cx
         radius = torch.sqrt(y_coords ** 2 + x_coords ** 2)
         
         # Low freq (blocks), mid freq (textures), high freq (should be low)

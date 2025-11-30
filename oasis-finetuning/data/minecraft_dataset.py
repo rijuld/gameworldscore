@@ -4,7 +4,8 @@ Minecraft gameplay dataset for Oasis RL finetuning.
 Provides dataloaders for:
 1. MinecraftDataset: Pre-recorded gameplay video for supervised training
 2. MiDaSMinecraftDataset: MiDaS-60 image dataset with synthetic sequences
-3. MinecraftRolloutDataset: On-policy rollout data for RL training
+3. ScreenshotsDataset: Flat directory of screenshots (no subfolders)
+4. MinecraftRolloutDataset: On-policy rollout data for RL training
 """
 
 import os
@@ -184,6 +185,136 @@ class MiDaSMinecraftDataset(Dataset):
             'initial_frame': initial_frame,  # (1, C, H, W) - only the first frame!
             'actions': actions,  # (T, action_dim) - action sequence for generation
             'category': category_name,
+        }
+
+
+class ScreenshotsDataset(Dataset):
+    """
+    Dataset for a flat directory of Minecraft screenshots (no subfolders).
+    
+    For RL training of world models, we only need:
+    - **First frame**: The initial observation (from dataset)
+    - **Action sequence**: Actions to condition generation on (randomly sampled)
+    
+    Expected structure:
+        data_dir/
+        ├── screenshot_001.png
+        ├── screenshot_002.png
+        ├── screenshot_003.jpg
+        └── ... (any image files)
+    
+    No subfolders or category structure required.
+    """
+    
+    def __init__(
+        self,
+        data_dir: str,
+        split: str = "train",  # Ignored for flat structure, kept for API compatibility
+        sequence_length: int = 32,
+        frame_size: Tuple[int, int] = (360, 640),
+        transform: Optional[callable] = None,
+        augment: bool = True,
+    ):
+        """
+        Args:
+            data_dir: Directory containing image files (flat, no subfolders)
+            split: Ignored (kept for API compatibility)
+            sequence_length: Length of action sequence to generate
+            frame_size: Target frame size (H, W)
+            transform: Optional transform to apply to first frame
+            augment: If True, apply data augmentation to first frame
+        """
+        self.data_dir = Path(data_dir)
+        self.sequence_length = sequence_length
+        self.frame_size = frame_size
+        self.transform = transform
+        self.augment = augment
+        
+        # Set up augmentation transforms for the first frame
+        if augment and split == "train":
+            self.augment_transform = transforms.Compose([
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ColorJitter(
+                    brightness=0.2,
+                    contrast=0.2,
+                    saturation=0.2,
+                    hue=0.1,
+                ),
+            ])
+        else:
+            self.augment_transform = None
+        
+        # Index all images in the flat directory
+        self.images = self._index_images()
+        
+        print(f"ScreenshotsDataset: Found {len(self.images)} images in {data_dir}")
+        print(f"  -> Each sample provides: 1 initial frame + {sequence_length} random actions")
+    
+    def _index_images(self) -> List[Path]:
+        """Index all images in the flat directory."""
+        images = []
+        
+        # Look for images directly in data_dir (no subfolders)
+        for ext in ["*.png", "*.jpg", "*.jpeg", "*.PNG", "*.JPG", "*.JPEG"]:
+            images.extend(self.data_dir.glob(ext))
+        
+        # Sort for reproducibility
+        images = sorted(images)
+        
+        if len(images) == 0:
+            raise ValueError(f"No images found in {self.data_dir}. "
+                           f"Expected .png/.jpg/.jpeg files directly in the folder.")
+        
+        return images
+    
+    def __len__(self) -> int:
+        return len(self.images)
+    
+    def _load_and_preprocess_image(self, image_path: Path) -> torch.Tensor:
+        """Load and preprocess a single image."""
+        image = read_image(str(image_path))  # (C, H, W) uint8
+        
+        # Resize to target size
+        image = resize(image, self.frame_size)
+        
+        # Convert to float [0, 1]
+        image = image.float() / 255.0
+        
+        return image
+    
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Get a single initial frame and action sequence for RL training.
+        
+        Returns:
+            Dict with:
+                - initial_frame: (1, C, H, W) the first frame (prompt)
+                - actions: (T, action_dim) random action sequence
+                - category: filename (for logging)
+        """
+        image_path = self.images[idx]
+        
+        # Load and preprocess the initial frame
+        initial_frame = self._load_and_preprocess_image(image_path)  # (C, H, W)
+        
+        # Apply augmentation to the initial frame
+        if self.augment_transform is not None:
+            initial_frame = self.augment_transform(initial_frame)
+        
+        # Apply custom transform if provided
+        if self.transform is not None:
+            initial_frame = self.transform(initial_frame)
+        
+        # Add time dimension: (C, H, W) -> (1, C, H, W)
+        initial_frame = initial_frame.unsqueeze(0)
+        
+        # Generate random action sequence for world model conditioning
+        actions = sample_random_action(self.sequence_length)
+        
+        return {
+            'initial_frame': initial_frame,  # (1, C, H, W) - only the first frame!
+            'actions': actions,  # (T, action_dim) - action sequence for generation
+            'category': image_path.stem,  # Use filename as "category" for logging
         }
 
 
@@ -397,7 +528,7 @@ def create_minecraft_dataloader(
         clip_length: Number of frames per clip
         num_workers: Number of data loading workers
         shuffle: Whether to shuffle data
-        dataset_type: 'auto', 'video', or 'midas'
+        dataset_type: 'auto', 'video', 'midas', or 'screenshots'
         split: 'train' or 'test' (for MiDaS dataset)
         frame_size: Target frame size (H, W)
         
@@ -418,6 +549,9 @@ def create_minecraft_dataloader(
         elif any((data_path / d).is_dir() and len(list((data_path / d).glob("*.png"))) > 0 
                  for d in os.listdir(data_path) if (data_path / d).is_dir()):
             dataset_type = "midas"
+        # Check for flat directory of images (screenshots)
+        elif len(list(data_path.glob("*.png")) + list(data_path.glob("*.jpg"))) > 0:
+            dataset_type = "screenshots"
         else:
             raise ValueError(f"Could not detect dataset type in {data_dir}")
     
@@ -425,7 +559,17 @@ def create_minecraft_dataloader(
     kwargs.pop('split', None)
     kwargs.pop('frame_size', None)
     
-    if dataset_type == "midas":
+    if dataset_type == "screenshots":
+        # Flat directory of images (no subfolders)
+        dataset = ScreenshotsDataset(
+            data_dir=data_dir,
+            split=split,
+            sequence_length=clip_length,
+            frame_size=frame_size,
+            augment=(split == "train"),
+            **kwargs,
+        )
+    elif dataset_type == "midas":
         dataset = MiDaSMinecraftDataset(
             data_dir=data_dir,
             split=split,
@@ -434,13 +578,16 @@ def create_minecraft_dataloader(
             augment=(split == "train"),
             **kwargs,
         )
-    else:
+    elif dataset_type == "video":
         dataset = MinecraftDataset(
             data_dir=data_dir,
             clip_length=clip_length,
             frame_size=frame_size,
             **kwargs,
         )
+    else:
+        raise ValueError(f"Unknown dataset_type: {dataset_type}. "
+                        f"Expected 'auto', 'screenshots', 'midas', or 'video'.")
     
     # Custom collate function
     def collate_fn(batch):

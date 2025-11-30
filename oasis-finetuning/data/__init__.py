@@ -5,6 +5,7 @@ Data loading utilities for Minecraft gameplay data.
 from .minecraft_dataset import (
     MinecraftDataset,
     MiDaSMinecraftDataset,
+    ScreenshotsDataset,
     MinecraftRolloutDataset,
     create_minecraft_dataloader,
     create_midas_dataloaders,
@@ -15,6 +16,7 @@ from .action_utils import ACTION_KEYS, one_hot_actions, decode_actions, sample_r
 __all__ = [
     "MinecraftDataset",
     "MiDaSMinecraftDataset",
+    "ScreenshotsDataset",
     "MinecraftRolloutDataset",
     "create_minecraft_dataloader",
     "create_midas_dataloaders",

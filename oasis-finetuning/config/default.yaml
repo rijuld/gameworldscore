@@ -9,7 +9,7 @@
 # Model Paths
 # -----------------------------------------------------------------------------
 model:
-  ddim_steps: 4             # DDIM denoising steps (default 10, reduce for speed)
+  ddim_steps: 6             # DDIM denoising steps (default 10, reduce for speed)
   oasis_ckpt: "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/oasis500m.safetensors"
   vae_ckpt: "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/vit-l-20.safetensors"
   dit_type: "DiT-S/2"
@@ -26,7 +26,7 @@ reward:
   rik_weight: 1.0           # Inverse Kinematics (action fidelity)
   rtc_weight: 0             # Temporal Consistency (CLIP similarity)
   raq_weight: 0             # Aesthetic Quality (LAION aesthetic)
-  rrg_weight: 0.5           # Reality Grounding (anti-drift) - NEW!
+  rrg_weight: 0           # Reality Grounding (anti-drift) - NEW!
   use_motion_smoothness: true
   add_reward_noise: true    # Add small noise to break reward ties
 
@@ -35,7 +35,7 @@ reward:
 # -----------------------------------------------------------------------------
 data:
   data_dir: "Dataset/MiDaS-60_small"
-  dataset_type: "auto"      # auto, video, or midas
+  dataset_type: "screenshots"      # screenshots, auto, video, or midas
   train_batch_size: 1
   n_prompt_frames: 1
   max_gen_frames: 2         # Reduced for memory optimization

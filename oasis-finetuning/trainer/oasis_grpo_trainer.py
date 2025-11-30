@@ -110,7 +110,7 @@ class OasisGRPOConfig:
     max_gen_frames: int = 2  # Reduced from 4 to 2 for memory optimization
     
     # GRPO hyperparameters (following RLVR-World)
-    learning_rate: float = 5e-7
+    learning_rate: float = 1e-5  # Increased from 5e-7 for visible learning
     gamma: float = 0.99
     lam: float = 0.95
     clip_ratio: float = 0.2
@@ -189,6 +189,21 @@ class OasisGRPOTrainer:
         self.config = config
         self.device = config.device
         self.global_step = 0
+        
+        # CRITICAL: Print and verify config values
+        print("=" * 60)
+        print("CRITICAL CONFIG VALUES:")
+        print(f"  group_size: {self.config.group_size}")
+        print(f"  update_micro_batch_size: {self.config.update_micro_batch_size}")
+        print(f"  grpo_epochs: {self.config.grpo_epochs}")
+        print(f"  reward_scale: {self.config.reward_scale}")
+        print(f"  learning_rate: {self.config.learning_rate}")
+        print("=" * 60)
+        
+        # FORCE OVERRIDE: Ensure micro_batch_size equals group_size for balanced gradients
+        if self.config.update_micro_batch_size != self.config.group_size:
+            print(f"⚠️  OVERRIDE: Setting update_micro_batch_size from {self.config.update_micro_batch_size} to {self.config.group_size}")
+            self.config.update_micro_batch_size = self.config.group_size
         
         # Enable TF32 for faster matrix multiplications on Ampere+ GPUs
         if config.enable_tf32 and torch.cuda.is_available():

@@ -294,13 +294,26 @@ class RealityGroundingReward(nn.Module):
     def _compute_local_variance(self, frames: torch.Tensor) -> torch.Tensor:
         """Compute local variance (detects smooth regions)."""
         B = frames.shape[0]
-        
-        # Use average pooling to get local mean
         kernel_size = 8
-        local_mean = F.avg_pool2d(frames, kernel_size, stride=1, padding=kernel_size//2)
         
-        # Local variance
-        local_var = F.avg_pool2d((frames - local_mean) ** 2, kernel_size, stride=1, padding=kernel_size//2)
+        # Explicit padding to ensure output size matches input size
+        # K=8, need total padding 7. (3, 4)
+        # F.pad expects (left, right, top, bottom)
+        padding = (3, 4, 3, 4)
+        
+        frames_padded = F.pad(frames, padding, mode='reflect')
+        
+        # Local mean
+        local_mean = F.avg_pool2d(frames_padded, kernel_size, stride=1, padding=0)
+        
+        # Local variance: avg((x - mu)^2)
+        # We need to compute (frames - local_mean)^2. 
+        # frames and local_mean are now same size (H, W).
+        diff_sq = (frames - local_mean) ** 2
+        
+        # Pad again for the second pooling
+        diff_sq_padded = F.pad(diff_sq, padding, mode='reflect')
+        local_var = F.avg_pool2d(diff_sq_padded, kernel_size, stride=1, padding=0)
         
         return local_var.view(B, -1).mean(dim=-1)
     

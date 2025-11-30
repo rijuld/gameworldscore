@@ -473,7 +473,25 @@ class OasisGRPOTrainer:
                     ref_log_probs = torch.stack(ref_log_probs_list, dim=1)
                     
                     # Immediately move ref_log_probs back to GPU and clean up CPU copies
-        # Ensure all return values are on GPU
+                    if self.ref_policy_device == "cpu":
+                        ref_log_probs = ref_log_probs.to(self.device)
+                        del all_frames_for_ref, actions_for_ref, ref_latents
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    else:
+                        del ref_latents
+                    
+                    del ref_log_probs_list
+                else:
+                    # Skip KL computation this step
+                    del latents
+                    ref_log_probs = None
+            else:
+                del latents
+        
+        # Create group indices (on GPU)
+        # [0, 0, 0, 0, 1, 1, 1, 1, ...]
+        indices = torch.arange(B, device=self.device).repeat_interleave(G)
         if all_frames.device != self.device:
             all_frames = all_frames.to(self.device)
         if log_probs.device != self.device:

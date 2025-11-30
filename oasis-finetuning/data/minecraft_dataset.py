@@ -421,9 +421,11 @@ def create_minecraft_dataloader(
         else:
             raise ValueError(f"Could not detect dataset type in {data_dir}")
     
-    # Remove split from kwargs if present (we handle it explicitly)
+    # Extract DataLoader-specific kwargs before passing to dataset
     kwargs.pop('split', None)
     kwargs.pop('frame_size', None)
+    pin_memory = kwargs.pop('pin_memory', True)
+    prefetch_factor = kwargs.pop('prefetch_factor', 2)
     
     if dataset_type == "midas":
         dataset = MiDaSMinecraftDataset(

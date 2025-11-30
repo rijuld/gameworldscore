@@ -30,6 +30,7 @@ from .temporal_consistency import TemporalConsistencyRewardV2 as TemporalConsist
 from .temporal_consistency import load_temporal_consistency_reward_v2
 from .aesthetic_quality import AestheticQualityReward
 from .reality_grounding import RealityGroundingReward
+from .anti_drift import AntiDriftReward
 
 
 @dataclass
@@ -39,17 +40,19 @@ class RewardWeights:
     rtc: float = 1.0
     raq: float = 1.0
     rrg: float = 0.0  # Reality grounding (anti-drift)
+    anti_drift: float = 0.0  # New Anti-Drift Reward
     
     def normalize(self) -> 'RewardWeights':
         """Normalize weights to sum to 1."""
-        total = self.rik + self.rtc + self.raq + self.rrg
+        total = self.rik + self.rtc + self.raq + self.rrg + self.anti_drift
         if total == 0:
-            return RewardWeights(0.0, 0.0, 0.0, 0.0)
+            return RewardWeights(0.0, 0.0, 0.0, 0.0, 0.0)
         return RewardWeights(
             rik=self.rik / total,
             rtc=self.rtc / total,
             raq=self.raq / total,
             rrg=self.rrg / total,
+            anti_drift=self.anti_drift / total,
         )
 
 
@@ -61,10 +64,8 @@ class GameWorldScoreReward(nn.Module):
     - Action fidelity (RIK): Does the transition match the intended action?
     - Temporal consistency (RTC): Are consecutive frames smooth and coherent?
     - Aesthetic quality (RAQ): Does the frame look visually good?
-    
-    Unlike ground-truth comparison methods, this reward can be computed
-    purely from generated outputs, enabling RL training on long-horizon
-    rollouts without access to future ground-truth frames.
+    - Reality Grounding (RRG): Anti-drift anchoring.
+    - Anti-Drift (AD): Sharpness, motion, texture, anti-grid.
     """
     
     def __init__(
@@ -79,6 +80,7 @@ class GameWorldScoreReward(nn.Module):
         rtc_weight: float = 1.0,
         raq_weight: float = 1.0,
         rrg_weight: float = 0.0,  # Reality grounding (anti-drift)
+        anti_drift_weight: float = 0.0, # New Anti-Drift
         normalize_weights: bool = True,
         # Settings
         device: str = "cuda",
@@ -90,7 +92,7 @@ class GameWorldScoreReward(nn.Module):
         
         # Store weights
         self.weights = RewardWeights(
-            rik=rik_weight, rtc=rtc_weight, raq=raq_weight, rrg=rrg_weight
+            rik=rik_weight, rtc=rtc_weight, raq=raq_weight, rrg=rrg_weight, anti_drift=anti_drift_weight
         )
         if normalize_weights:
             self.weights = self.weights.normalize()
@@ -127,8 +129,19 @@ class GameWorldScoreReward(nn.Module):
                 device=device,
                 embed_weight=1.0,
                 texture_weight=0.5,
-                fft_weight=0.3,
-                edge_weight=0.2,
+                fft_weight=0.05,  # FIXED: Reduced to prevent grid artifacts
+                edge_weight=1.0,  # FIXED: Increased to force sharpness (anti-blur)
+            )
+            
+        # Anti-Drift Reward
+        self.anti_drift = None
+        if anti_drift_weight > 0:
+            self.anti_drift = AntiDriftReward(
+                device=device,
+                sharpness_weight=1.0,
+                motion_weight=2.0,
+                texture_weight=0.8,
+                anti_grid_weight=0.5,
             )
     
     @torch.no_grad()
@@ -254,12 +267,25 @@ class GameWorldScoreReward(nn.Module):
             rrg_info = {}
         rrg_time_total = time.perf_counter() - rrg_start
         
+        # Time Anti-Drift
+        ad_start = time.perf_counter()
+        if self.weights.anti_drift > 0 and self.anti_drift is not None:
+            # User's AntiDriftReward requires return_per_frame=True to get (B, T-1)
+            ad_rewards, ad_info = self.anti_drift.compute_sequence_reward(
+                frames, actions, return_per_frame=True
+            )
+        else:
+            ad_rewards = torch.zeros(frames.shape[0], frames.shape[1]-1, device=self.device)
+            ad_info = {}
+        ad_time_total = time.perf_counter() - ad_start
+        
         # Weighted combination: (B, T-1)
         frame_rewards = (
             self.weights.rik * rik_rewards +
             self.weights.rtc * rtc_rewards +
             self.weights.raq * raq_rewards +
-            self.weights.rrg * rrg_rewards
+            self.weights.rrg * rrg_rewards +
+            self.weights.anti_drift * ad_rewards
         )
         
         # Aggregate info
@@ -269,12 +295,18 @@ class GameWorldScoreReward(nn.Module):
             'rtc_reward': rtc_rewards.mean().item(),
             'raq_reward': raq_rewards.mean().item(),
             'rrg_reward': rrg_rewards.mean().item(),
+            'anti_drift_reward': ad_rewards.mean().item(),
             # Timing info
             'time_rik_sec': rik_time_total,
             'time_rtc_sec': rtc_time_total,
             'time_raq_sec': raq_time_total,
             'time_rrg_sec': rrg_time_total,
+            'time_ad_sec': ad_time_total,
         }
+        
+        # Add Anti-Drift sub-info
+        for k, v in ad_info.items():
+            info[k] = v
         
         # Add sub-reward info if available
         if 'rik_ce_loss' in rik_info:
@@ -349,6 +381,7 @@ def create_game_world_score_reward(
     rtc_weight: float = 1.0,
     raq_weight: float = 1.0,
     rrg_weight: float = 0.0,
+    anti_drift_weight: float = 0.0,
     require_vpt: bool = True,
 ) -> GameWorldScoreReward:
     """
@@ -367,6 +400,7 @@ def create_game_world_score_reward(
         rtc_weight: Weight for RTC component
         raq_weight: Weight for RAQ component
         rrg_weight: Weight for RRG component (Reality Grounding, anti-drift)
+        anti_drift_weight: Weight for Anti-Drift component
         require_vpt: If True, raise error when VPT IDM cannot be loaded.
                      If False, fall back to SimpleIDM (less accurate).
         
@@ -399,6 +433,7 @@ def create_game_world_score_reward(
         rtc_weight=rtc_weight,
         raq_weight=raq_weight,
         rrg_weight=rrg_weight,
+        anti_drift_weight=anti_drift_weight,
         device=device,
         require_vpt=require_vpt,
     )

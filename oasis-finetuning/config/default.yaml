@@ -23,10 +23,11 @@ reward:
   idm_weights_path: "models_for_rl_finetuning/4x_idm.weights"
   require_vpt: true
   # GameWorldScore component weights
-  rik_weight: 1           # Inverse Kinematics (action fidelity)
-  rtc_weight: 1             # Temporal Consistency (CLIP similarity)
-  raq_weight: 0           # Aesthetic Quality (LAION aesthetic)
-  rrg_weight: 1             # Reality Grounding (anti-drift) - NEW!
+  rik_weight: 0           # Inverse Kinematics (action fidelity)
+  rtc_weight: 0           # Temporal Consistency (CLIP similarity) - FIXED: Reduced to 0.5
+  raq_weight: 0           # Aesthetic Quality (LAION aesthetic) - FIXED: Disabled
+  rrg_weight: 0           # Reality Grounding (anti-drift)
+  anti_drift_weight: 1    # Anti-Drift (Sharpness/Motion/Texture) - NEW!
   use_motion_smoothness: true
   add_reward_noise: true    # Add small noise to break reward ties
 
@@ -49,7 +50,7 @@ data:
 training:
   total_epochs: 10
   total_training_steps: 10000
-  learning_rate: 5.0e-6     # FIXED: Increased to 5.0e-6 for faster learning
+  learning_rate: 2.0e-6     # FIXED: Reverted to 2.0e-6 for stability
   weight_decay: 0.01
   grad_clip: 0.1            # FIXED: Much stricter clipping (was 0.5) to prevent explosions
   device: "cuda"
@@ -66,7 +67,7 @@ grpo:
   clip_ratio: 0.2
   log_ratio_clip: 0.2       # FIXED: Tighter clamp (was 2.0) to prevent extreme ratios
   entropy_coeff: 0.001
-  reward_scale: 50.0        # FIXED: Increased to 50.0 to amplify learning signal
+  reward_scale: 10.0        # FIXED: Reverted to 10.0 (safe with advantage normalization)
   adv_estimator: "grpo"     # grpo, reinforce_plus_plus, or gae
 
 # -----------------------------------------------------------------------------
@@ -74,8 +75,8 @@ grpo:
 # -----------------------------------------------------------------------------
 kl:
   use_kl_in_reward: true
-  kl_coeff: 0.05            # FIXED: Increased (was 0.005) to prevent policy drift
-  kl_target: 0.1
+  kl_coeff: 0.01            # FIXED: Reduced (was 0.05) to allow more exploration
+  kl_target: 0.2            # FIXED: Increased (was 0.1) to allow more drift
   kl_compute_freq: 5        # Compute KL every N steps
 
 # -----------------------------------------------------------------------------

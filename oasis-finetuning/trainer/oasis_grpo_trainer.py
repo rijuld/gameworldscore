@@ -683,6 +683,12 @@ class OasisGRPOTrainer:
         old_log_probs = old_log_probs.detach()
         advantages = advantages.detach()
         
+        # CRITICAL FIX: Normalize advantages to prevent policy degradation
+        # This ensures gradients are well-scaled regardless of reward magnitude
+        if advantages.std() > 1e-8:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        
         if response_mask is None:
             response_mask = torch.ones_like(old_log_probs)
         
@@ -938,7 +944,7 @@ class OasisGRPOTrainer:
             if avg_kl > target_kl * 1.5:
                 # KL too high, increase penalty
                 self.config.kl_coeff *= 1.5
-                self.config.kl_coeff = min(self.config.kl_coeff, 10.0) # Cap at 10.0
+                self.config.kl_coeff = min(self.config.kl_coeff, 1.0) # Cap at 1.0 (was 10.0)
                 print(f"  [Adaptive KL] High KL ({avg_kl:.4f}), increasing coeff to {self.config.kl_coeff:.4f}")
             elif avg_kl < target_kl / 1.5:
                 # KL too low, decrease penalty
@@ -1090,6 +1096,7 @@ class OasisGRPOTrainer:
         rtc_val = reward_info.get('rtc_reward', reward_info.get('reward/rtc', 0.0))
         raq_val = reward_info.get('raq_reward', reward_info.get('reward/raq', 0.0))
         rrg_val = reward_info.get('rrg_reward', reward_info.get('reward/rrg', 0.0))
+        ad_val = reward_info.get('anti_drift_reward', reward_info.get('reward/anti_drift', 0.0))
         
         # Format progress bar info if available (matches tqdm format: "8/32400 [03:50<198:35:32, 22.07s/it]")
         if pbar is not None:
@@ -1135,7 +1142,7 @@ class OasisGRPOTrainer:
         
         print(f"{progress_info} | "
               f"gen={gen_time:.2f}s, reward={reward_time:.2f}s, update={grpo_time:.2f}s | "
-              f"Reward={reward_mean:.3f}±{reward_std:.3f} (RIK={rik_val:.3f}, RTC={rtc_val:.3f}, RAQ={raq_val:.3f}, RRG={rrg_val:.3f}) | "
+              f"Reward={reward_mean:.3f}±{reward_std:.3f} (RIK={rik_val:.3f}, RTC={rtc_val:.3f}, AD={ad_val:.3f}) | "
               f"loss={loss_val:.4f}, grad={grad_val:.4f}, "
               f"clip={clip_val:.2%}, adv+={adv_info.get('advantage_pos_pct', 50.0):.0f}%",
               flush=True)

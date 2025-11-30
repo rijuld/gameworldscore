@@ -84,89 +84,8 @@ from data.minecraft_dataset import (
 from workers.oasis_actor import OasisActorWorker, OasisActorConfig
 from workers.oasis_rollout import OasisRolloutWorker, OasisRolloutConfig
 
-
-@dataclass
-class OasisGRPOConfig:
-    """Configuration for Oasis GRPO training."""
-    # Model paths
-    oasis_ckpt: str = "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/oasis500m.safetensors"
-    vae_ckpt: str = "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/vit-l-20.safetensors"
-    reward_models_dir: str = "models_for_rl_finetuning"
-    
-    # Data settings
-    data_dir: str = "Dataset/MiDaS-60_small"
-    dataset_type: str = "auto"  # "auto", "video", "midas"
-    frame_size: Tuple[int, int] = (360, 640)
-    
-    # Training settings
-    total_epochs: int = 10
-    total_training_steps: int = 10000
-    train_batch_size: int = 1  # Number of unique prompts per step
-    group_size: int = 4  # Number of rollouts per prompt - balanced for memory and variance
-    grpo_epochs: int = 1  # Number of update epochs per step - optimized for speed
-    
-    # Rollout settings
-    n_prompt_frames: int = 1
-    max_gen_frames: int = 2  # Reduced from 4 to 2 for memory optimization
-    
-    # GRPO hyperparameters (following RLVR-World)
-    learning_rate: float = 1e-4  # Increased for visible learning (diffusion models need higher LR)
-    gamma: float = 0.99
-    lam: float = 0.95
-    clip_ratio: float = 0.2
-    log_ratio_clip: float = 2.0  # Added back for compatibility
-    entropy_coeff: float = 0.001
-    grad_clip: float = 1.0
-    reward_scale: float = 100.0  # Provides strong signal for GRPO advantages
-    
-    # Memory optimization settings
-    use_gradient_checkpointing: bool = True  # Enable gradient checkpointing to save memory
-    use_mixed_precision: bool = True  # Enable mixed precision training (FP16)
-    offload_reward_to_cpu: bool = False  # Offload reward models to CPU to save GPU memory
-    offload_ref_policy_to_cpu: bool = True  # Offload reference policy to CPU (saves ~14GB GPU memory)
-    cache_encoded_frames: bool = False  # DISABLED: Caching prevents gradient flow (causes clip=0)
-    kl_compute_freq: int = 5  # Compute KL divergence every N steps (1 = every step)
-    
-    # Performance optimizations
-    dataloader_num_workers: int = 4  # Number of workers for data loading
-    update_micro_batch_size: int = 4  # Micro-batch size for GRPO updates - MUST match group_size for balanced advantages
-    use_torch_compile: bool = False  # Enable torch.compile for potential speedup
-    enable_tf32: bool = True  # Enable TensorFloat-32 on Ampere+ GPUs
-    
-    # KL settings
-    use_kl_in_reward: bool = True  # Enable KL divergence penalty (ref policy on CPU to save memory)
-    kl_coeff: float = 0.01
-    kl_target: float = 0.1
-    
-    # Reward noise settings
-    add_reward_noise: bool = True  # Add small noise to break reward ties for GRPO
-    
-    # Reward weights (GameWorldScore)
-    rik_weight: float = 1.0
-    rtc_weight: float = 1.0
-    raq_weight: float = 1.0
-    require_vpt: bool = True
-    use_motion_smoothness: bool = True
-    
-    # Advantage estimation
-    adv_estimator: str = "grpo"  # "grpo" (recommended)
-    
-    # Checkpointing
-    save_freq: int = 100
-    test_freq: int = 50
-    checkpoint_dir: str = "checkpoints/oasis_grpo"
-    
-    # Video saving
-    video_save_freq: int = 50
-    video_save_dir: str = "samples"
-    
-    # Logging
-    project_name: str = "oasis_rl_finetuning"
-    experiment_name: str = "grpo_gameworldscore"
-    use_wandb: bool = True
-    
-    # Device
-    device: str = "cuda"
+# Import config from loader - YAML is the single source of truth
+from config.loader import OasisGRPOConfig, load_config, print_config
 
 
 class OasisGRPOTrainer:
@@ -190,15 +109,8 @@ class OasisGRPOTrainer:
         self.device = config.device
         self.global_step = 0
         
-        # CRITICAL: Print and verify config values
-        print("=" * 60)
-        print("CRITICAL CONFIG VALUES:")
-        print(f"  group_size: {self.config.group_size}")
-        print(f"  update_micro_batch_size: {self.config.update_micro_batch_size}")
-        print(f"  grpo_epochs: {self.config.grpo_epochs}")
-        print(f"  reward_scale: {self.config.reward_scale}")
-        print(f"  learning_rate: {self.config.learning_rate}")
-        print("=" * 60)
+        # Print config values (loaded from YAML)
+        print_config(config)
         
         # FORCE OVERRIDE: Ensure micro_batch_size equals group_size for balanced gradients
         if self.config.update_micro_batch_size != self.config.group_size:
@@ -1309,6 +1221,16 @@ class OasisGRPOTrainer:
         }, checkpoint_path)
         print(f"\nSaved checkpoint to {path}", flush=True)
 
-def create_oasis_grpo_trainer(oasis_ckpt, vae_ckpt, reward_models_dir="models_for_rl_finetuning", **kwargs):
-    config = OasisGRPOConfig(oasis_ckpt=oasis_ckpt, vae_ckpt=vae_ckpt, reward_models_dir=reward_models_dir, **kwargs)
+def create_oasis_grpo_trainer(config_path: str = None, **overrides):
+    """
+    Create trainer with config from YAML file.
+    
+    Args:
+        config_path: Path to YAML config (default: config/default.yaml)
+        **overrides: Override specific config values
+    
+    Returns:
+        OasisGRPOTrainer instance
+    """
+    config = load_config(config_path, **overrides) if config_path else load_config(**overrides)
     return OasisGRPOTrainer(config)

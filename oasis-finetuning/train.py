@@ -2,32 +2,24 @@
 """
 Oasis RL Finetuning - Main Training Script
 
-This script provides the entry point for RL finetuning of the Oasis world model
-using GameWorldScore reward (ground-truth-free).
+All configuration is loaded from config/default.yaml (single source of truth).
+Command-line arguments can override specific values.
 
 Usage:
-    python train.py --oasis-ckpt path/to/oasis.safetensors --vae-ckpt path/to/vae.safetensors
+    # Use default config
+    python train.py
     
-    # With custom config
+    # With custom config file
     python train.py --config config/custom.yaml
     
     # Override specific parameters
-    python train.py --oasis-ckpt oasis.safetensors --learning-rate 5e-6 --use-wandb
-
-Example:
-    python train.py \
-        --oasis-ckpt oasis500m.safetensors \
-        --vae-ckpt vit-l-20.safetensors \
-        --data-dir open-oasis/sample_data \
-        --total-steps 10000 \
-        --use-wandb
+    python train.py --learning-rate 5e-5 --no-wandb
 """
 
 import os
 import sys
 import argparse
 from pathlib import Path
-from pprint import pprint
 
 # Add the oasis-finetuning directory to sys.path for proper imports
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -36,314 +28,42 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import torch
 
+# Import config loader
+from config.loader import load_config, DEFAULT_CONFIG_PATH
+
 
 def parse_args():
+    """Parse command-line arguments. All values come from YAML by default."""
     parser = argparse.ArgumentParser(
-        description="Oasis RL Finetuning with GameWorldScore Reward",
+        description="Oasis RL Finetuning - Config loaded from YAML",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    
-    # Model paths
-    parser.add_argument(
-        "--oasis-ckpt",
-        type=str,
-        default="/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/oasis500m.safetensors",
-        help="Path to Oasis DiT checkpoint",
-    )
-    parser.add_argument(
-        "--vae-ckpt",
-        type=str,
-        default="/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/vit-l-20.safetensors",
-        help="Path to VAE checkpoint",
-    )
-    parser.add_argument(
-        "--reward-models-dir",
-        type=str,
-        default="models_for_rl_finetuning",
-        help="Directory containing reward model checkpoints",
-    )
-    
-    # Data
-    parser.add_argument(
-        "--data-dir",
-        type=str,
-        default="Dataset/MiDaS-60_small",
-        help="Directory containing training data (default: Dataset/MiDaS-60_small)",
-    )
-    parser.add_argument(
-        "--dataset-type",
-        type=str,
-        default="auto",
-        choices=["auto", "video", "midas"],
-        help="Dataset type: auto (detect), video (mp4 files), midas (image folders)",
-    )
-    parser.add_argument(
-        "--frame-height",
-        type=int,
-        default=360,
-        help="Target frame height",
-    )
-    parser.add_argument(
-        "--frame-width",
-        type=int,
-        default=640,
-        help="Target frame width",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        help="Training batch size (reduced to 1 for memory efficiency)",
-    )
-    parser.add_argument(
-        "--n-prompt-frames",
-        type=int,
-        default=1,
-        help="Number of prompt frames",
-    )
-    parser.add_argument(
-        "--max-gen-frames",
-        type=int,
-        default=4,
-        help="Maximum frames to generate per rollout (reduced to prevent OOM)",
-    )
-    
-    # Performance optimizations
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=4,
-        help="Number of dataloader workers",
-    )
-    parser.add_argument(
-        "--micro-batch-size",
-        type=int,
-        default=1,
-        help="Micro-batch size for GRPO updates (increase for speed if VRAM allows)",
-    )
-    parser.add_argument(
-        "--compile",
-        action="store_true",
-        help="Enable torch.compile for DiT model (experimental)",
-    )
-    parser.add_argument(
-        "--no-tf32",
-        action="store_true",
-        help="Disable TensorFloat-32 (TF32) on Ampere+ GPUs",
-    )
-    parser.add_argument(
-        "--no-motion-smoothness",
-        action="store_true",
-        help="Disable motion smoothness reward (enabled by default)",
-    )
-    parser.add_argument(
-        "--offload-reward",
-        action="store_true",
-        help="Offload reward models to CPU (disabled by default for speed)",
-    )
-    parser.add_argument(
-        "--offload-ref",
-        action="store_true",
-        help="Offload reference policy to CPU (disabled by default for speed)",
-    )
-    
-    # Training
-    parser.add_argument(
-        "--total-steps",
-        type=int,
-        default=10000,
-        help="Total training steps",
-    )
-    parser.add_argument(
-        "--total-epochs",
-        type=int,
-        default=10,
-        help="Total training epochs",
-    )
-    parser.add_argument(
-        "--learning-rate",
-        type=float,
-        default=5e-7,
-        help="Learning rate (conservative for GRPO stability)",
-    )
-    parser.add_argument(
-        "--grpo-epochs",
-        type=int,
-        default=4,
-        help="GRPO update epochs per step (higher = more sample efficient)",
-    )
-    parser.add_argument(
-        "--clip-ratio",
-        type=float,
-        default=0.2,
-        help="PPO clip ratio for policy updates",
-    )
-    parser.add_argument(
-        "--log-ratio-clip",
-        type=float,
-        default=2.0,
-        help="Clamp log(ratio) before exp() to prevent overflow (CRITICAL for stability)",
-    )
-    parser.add_argument(
-        "--grad-clip",
-        type=float,
-        default=1.0,
-        help="Gradient clipping threshold",
-    )
-    parser.add_argument(
-        "--reward-scale",
-        type=float,
-        default=1.0,
-        help="Scale factor for rewards",
-    )
-    
-    # Reward weights
-    parser.add_argument(
-        "--rik-weight",
-        type=float,
-        default=1.0,
-        help="Weight for RIK (action fidelity) reward",
-    )
-    parser.add_argument(
-        "--rtc-weight",
-        type=float,
-        default=1.0,
-        help="Weight for RTC (temporal consistency) reward",
-    )
-    parser.add_argument(
-        "--raq-weight",
-        type=float,
-        default=1.0,
-        help="Weight for RAQ (aesthetic quality) reward",
-    )
-    parser.add_argument(
-        "--no-rik",
-        action="store_true",
-        help="Disable RIK reward (sets weight to 0)",
-    )
-    parser.add_argument(
-        "--no-rtc",
-        action="store_true",
-        help="Disable RTC reward (sets weight to 0)",
-    )
-    parser.add_argument(
-        "--no-raq",
-        action="store_true",
-        help="Disable RAQ reward (sets weight to 0)",
-    )
-    parser.add_argument(
-        "--require-vpt",
-        action="store_true",
-        default=True,
-        help="Require VPT IDM for RIK reward (error if unavailable)",
-    )
-    parser.add_argument(
-        "--no-require-vpt",
-        action="store_true",
-        help="Use SimpleIDM fallback when VPT is unavailable",
-    )
-    
-    # KL regularization
-    parser.add_argument(
-        "--no-kl",
-        action="store_true",
-        help="Disable KL penalty in reward (saves memory)",
-    )
-    parser.add_argument(
-        "--kl-coeff",
-        type=float,
-        default=0.001,
-        help="KL penalty coefficient",
-    )
-    
-    # Advantage estimation
-    parser.add_argument(
-        "--adv-estimator",
-        type=str,
-        default="grpo",
-        choices=["gae", "grpo", "reinforce_plus_plus"],
-        help="Advantage estimator (GRPO recommended for stability, needs batch>=4)",
-    )
-    
-    # Checkpointing
-    parser.add_argument(
-        "--checkpoint-dir",
-        type=str,
-        default="checkpoints/oasis_ppo",
-        help="Directory for saving checkpoints",
-    )
-    parser.add_argument(
-        "--save-freq",
-        type=int,
-        default=100,
-        help="Checkpoint save frequency (steps)",
-    )
-    parser.add_argument(
-        "--resume-from",
-        type=str,
-        default=None,
-        help="Resume training from checkpoint",
-    )
-    
-    # Video saving
-    parser.add_argument(
-        "--video-save-freq",
-        type=int,
-        default=50,
-        help="Save sample videos every N steps (0 to disable)",
-    )
-    parser.add_argument(
-        "--video-save-dir",
-        type=str,
-        default="samples",
-        help="Directory to save generated videos",
-    )
-    
-    # Logging
-    parser.add_argument(
-        "--project-name",
-        type=str,
-        default="oasis_rl_finetuning",
-        help="W&B project name",
-    )
-    parser.add_argument(
-        "--experiment-name",
-        type=str,
-        default="gameworldscore",
-        help="Experiment name",
-    )
-    parser.add_argument(
-        "--use-wandb",
-        action="store_true",
-        help="Enable W&B logging",
-    )
-    parser.add_argument(
-        "--no-wandb",
-        action="store_true",
-        help="Disable W&B logging",
-    )
-    
-    # Device
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Device to use (cuda/cpu)",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed",
     )
     
     # Config file
     parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to YAML config file (overrides defaults)",
+        "--config", type=str, default=DEFAULT_CONFIG_PATH,
+        help="Path to YAML config file (default: config/default.yaml)",
     )
+    
+    # Common overrides (optional - all default to None = use YAML value)
+    parser.add_argument("--oasis-ckpt", type=str, default=None)
+    parser.add_argument("--vae-ckpt", type=str, default=None)
+    parser.add_argument("--data-dir", type=str, default=None)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--total-steps", type=int, default=None)
+    parser.add_argument("--group-size", type=int, default=None)
+    parser.add_argument("--reward-scale", type=float, default=None)
+    parser.add_argument("--checkpoint-dir", type=str, default=None)
+    parser.add_argument("--resume-from", type=str, default=None)
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=42)
+    
+    # Boolean flags
+    parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
+    parser.add_argument("--no-kl", action="store_true", help="Disable KL penalty")
+    parser.add_argument("--no-rik", action="store_true", help="Disable RIK reward")
+    parser.add_argument("--no-rtc", action="store_true", help="Disable RTC reward")
+    parser.add_argument("--no-raq", action="store_true", help="Disable RAQ reward")
     
     return parser.parse_args()
 
@@ -366,75 +86,51 @@ def main():
     # Set seed
     set_seed(args.seed)
     
-    # Check device
-    if args.device == "cuda" and not torch.cuda.is_available():
-        print("CUDA not available, falling back to CPU")
-        args.device = "cpu"
+    # Build overrides dict from command-line args
+    overrides = {}
+    if args.oasis_ckpt: overrides['oasis_ckpt'] = args.oasis_ckpt
+    if args.vae_ckpt: overrides['vae_ckpt'] = args.vae_ckpt
+    if args.data_dir: overrides['data_dir'] = args.data_dir
+    if args.learning_rate: overrides['learning_rate'] = args.learning_rate
+    if args.total_steps: overrides['total_training_steps'] = args.total_steps
+    if args.group_size: overrides['group_size'] = args.group_size
+    if args.reward_scale: overrides['reward_scale'] = args.reward_scale
+    if args.checkpoint_dir: overrides['checkpoint_dir'] = args.checkpoint_dir
+    if args.device: overrides['device'] = args.device
     
+    # Boolean overrides
+    if args.no_wandb: overrides['use_wandb'] = False
+    if args.no_kl: overrides['use_kl_in_reward'] = False
+    if args.no_rik: overrides['rik_weight'] = 0.0
+    if args.no_rtc: overrides['rtc_weight'] = 0.0
+    if args.no_raq: overrides['raq_weight'] = 0.0
+    
+    # Load config from YAML with overrides
     print("=" * 60)
     print("Oasis GRPO Finetuning with GameWorldScore Reward")
+    print(f"Loading config from: {args.config}")
     print("=" * 60)
-    print("\nConfiguration:")
-    pprint(vars(args))
-    print()
+    
+    config = load_config(args.config, **overrides)
+    
+    # Check device
+    if config.device == "cuda" and not torch.cuda.is_available():
+        print("CUDA not available, falling back to CPU")
+        config.device = "cpu"
     
     # Check model files
-    if not os.path.exists(args.oasis_ckpt):
-        print(f"Warning: Oasis checkpoint not found at {args.oasis_ckpt}")
+    if not os.path.exists(config.oasis_ckpt):
+        print(f"Warning: Oasis checkpoint not found at {config.oasis_ckpt}")
         print("Please download the model or provide correct path.")
     
-    if not os.path.exists(args.vae_ckpt):
-        print(f"Warning: VAE checkpoint not found at {args.vae_ckpt}")
+    if not os.path.exists(config.vae_ckpt):
+        print(f"Warning: VAE checkpoint not found at {config.vae_ckpt}")
         print("Please download the model or provide correct path.")
     
-    # Import trainer
-    from trainer.oasis_grpo_trainer import OasisGRPOConfig, OasisGRPOTrainer
+    # Import trainer (config already loaded from YAML)
+    from trainer.oasis_grpo_trainer import OasisGRPOTrainer
     
-    # Create config
-    config = OasisGRPOConfig(
-        oasis_ckpt=args.oasis_ckpt,
-        vae_ckpt=args.vae_ckpt,
-        reward_models_dir=args.reward_models_dir,
-        data_dir=args.data_dir,
-        dataset_type=args.dataset_type,
-        frame_size=(args.frame_height, args.frame_width),
-        total_epochs=args.total_epochs,
-        total_training_steps=args.total_steps,
-        train_batch_size=args.batch_size,
-        n_prompt_frames=args.n_prompt_frames,
-        max_gen_frames=args.max_gen_frames,
-        learning_rate=args.learning_rate,
-        grpo_epochs=args.grpo_epochs,
-        clip_ratio=args.clip_ratio,
-        log_ratio_clip=args.log_ratio_clip,
-        grad_clip=args.grad_clip,
-        reward_scale=args.reward_scale,
-        rik_weight=0.0 if args.no_rik else args.rik_weight,
-        rtc_weight=0.0 if args.no_rtc else args.rtc_weight,
-        raq_weight=0.0 if args.no_raq else args.raq_weight,
-        require_vpt=args.require_vpt and not args.no_require_vpt,
-        use_kl_in_reward=not args.no_kl,
-        kl_coeff=args.kl_coeff,
-        adv_estimator=args.adv_estimator,
-        save_freq=args.save_freq,
-        checkpoint_dir=args.checkpoint_dir,
-        video_save_freq=args.video_save_freq,
-        video_save_dir=args.video_save_dir,
-        project_name=args.project_name,
-        experiment_name=args.experiment_name,
-        use_wandb=args.use_wandb and not args.no_wandb,
-        device=args.device,
-        # Optimizations
-        dataloader_num_workers=args.num_workers,
-        update_micro_batch_size=args.micro_batch_size,
-        use_torch_compile=args.compile,
-        enable_tf32=not args.no_tf32,
-        use_motion_smoothness=not args.no_motion_smoothness,
-        offload_reward_to_cpu=args.offload_reward,
-        offload_ref_policy_to_cpu=args.offload_ref,
-    )
-    
-    # Create trainer
+    # Create trainer with config from YAML
     print("\nInitializing trainer...")
     trainer = OasisGRPOTrainer(config)
     

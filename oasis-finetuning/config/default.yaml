@@ -1,101 +1,113 @@
-# Oasis RL Finetuning Configuration
-# Default configuration for GRPO training with GameWorldScore reward
-# GRPO (Group Relative Policy Optimization) is more stable than vanilla PPO
-# for diffusion model finetuning
+# =============================================================================
+# Oasis RL Finetuning Configuration - SINGLE SOURCE OF TRUTH
+# =============================================================================
+# All hyperparameters are defined here. Do NOT hardcode values in Python files.
+# Command-line arguments can override these values.
+# =============================================================================
 
-# Model paths
+# -----------------------------------------------------------------------------
+# Model Paths
+# -----------------------------------------------------------------------------
 model:
   oasis_ckpt: "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/oasis500m.safetensors"
   vae_ckpt: "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/vit-l-20.safetensors"
   dit_type: "DiT-S/2"
-  
-# Reward model paths
+
+# -----------------------------------------------------------------------------
+# Reward Configuration
+# -----------------------------------------------------------------------------
 reward:
   models_dir: "models_for_rl_finetuning"
-  # VPT IDM paths (download with: python download_reward_models.py)
   idm_model_path: "models_for_rl_finetuning/4x_idm.model"
   idm_weights_path: "models_for_rl_finetuning/4x_idm.weights"
-  # Set to false to use SimpleIDM fallback when VPT cannot be loaded
   require_vpt: true
-  # GameWorldScore component weights (all normalized to [0, 1])
-  rik_weight: 1.0  # Inverse Kinematics (action fidelity) - requires VPT IDM
-  rtc_weight: 1.0  # Temporal Consistency (CLIP similarity)
-  raq_weight: 1.0  # Aesthetic Quality (LAION aesthetic predictor)
-  reward_scale: 100.0  # Strong signal for GRPO advantages
-  normalize_weights: true
+  # GameWorldScore component weights
+  rik_weight: 1.0           # Inverse Kinematics (action fidelity)
+  rtc_weight: 1.0           # Temporal Consistency (CLIP similarity)
+  raq_weight: 1.0           # Aesthetic Quality (LAION aesthetic)
   use_motion_smoothness: true
+  add_reward_noise: true    # Add small noise to break reward ties
 
-# Data configuration
+# -----------------------------------------------------------------------------
+# Data Configuration
+# -----------------------------------------------------------------------------
 data:
   data_dir: "Dataset/MiDaS-60_small"
-  dataset_type: "auto"  # auto, video, or midas
-  train_batch_size: 1  # Reduced to 1 for memory efficiency
-  val_batch_size: 1
-  clip_length: 16
+  dataset_type: "auto"      # auto, video, or midas
+  train_batch_size: 1
   n_prompt_frames: 1
-  max_gen_frames: 4
-  frame_size: [360, 640]
+  max_gen_frames: 2         # Reduced for memory optimization
+  frame_height: 360
+  frame_width: 640
   num_workers: 4
-  sample_same_category: true
-  augment: true
 
-# Training configuration
+# -----------------------------------------------------------------------------
+# Training Configuration
+# -----------------------------------------------------------------------------
 training:
   total_epochs: 10
   total_training_steps: 10000
-  grpo_epochs: 1  # Single epoch for faster iteration
-  grpo_mini_batch_size: 1  # Reduced to 1 for memory efficiency
-  learning_rate: 1.0e-4  # Increased for visible learning on DiT
+  learning_rate: 1.0e-4     # Higher LR for DiT models
   weight_decay: 0.01
-  grad_clip: 0.5  # Reduced from 1.0 to prevent gradient explosion
-  
-# GRPO/PPO hyperparameters (following RLVR-World implementation)
+  grad_clip: 1.0
+  device: "cuda"
+
+# -----------------------------------------------------------------------------
+# GRPO Hyperparameters
+# -----------------------------------------------------------------------------
 grpo:
+  group_size: 4             # Number of rollouts per prompt
+  grpo_epochs: 1            # Update epochs per step (1 = faster)
+  update_micro_batch_size: 4  # MUST equal group_size for balanced advantages
   gamma: 0.99
   lam: 0.95
-  clip_ratio: 0.2  # Standard PPO clip ratio
-  log_ratio_clip: 2.0  # CRITICAL: Clamp log(ratio) to prevent exp() overflow
-  entropy_coeff: 0.001  # Small entropy bonus
-  reward_scale: 1.0  # Scale factor for rewards
-  
-# Advantage estimation
-advantage:
-  # GRPO is recommended for diffusion models (more stable than PPO)
-  estimator: "grpo"  # Options: "grpo" (recommended), "reinforce_plus_plus", "gae"
-  
-# KL regularization
+  clip_ratio: 0.2
+  log_ratio_clip: 2.0       # Clamp log(ratio) to prevent exp() overflow
+  entropy_coeff: 0.001
+  reward_scale: 100.0       # Scale rewards for strong GRPO signal
+  adv_estimator: "grpo"     # grpo, reinforce_plus_plus, or gae
+
+# -----------------------------------------------------------------------------
+# KL Regularization
+# -----------------------------------------------------------------------------
 kl:
-  use_kl_in_reward: true  # Enabled by default (disable with --no-kl to save memory)
+  use_kl_in_reward: true
   kl_coeff: 0.01
   kl_target: 0.1
-  adaptive_kl: true
-  
-# Rollout configuration  
-rollout:
-  n_rollouts: 1
-  temperature: 1.0
-  ddim_steps: 5  # Reduced from 10 to 5 for faster generation (quality trade-off)
-  do_sample: true
-  
-# Checkpointing and logging
+  kl_compute_freq: 5        # Compute KL every N steps
+
+# -----------------------------------------------------------------------------
+# Memory Optimization
+# -----------------------------------------------------------------------------
+memory:
+  use_gradient_checkpointing: true
+  use_mixed_precision: true
+  offload_reward_to_cpu: false
+  offload_ref_policy_to_cpu: true   # Saves ~14GB GPU memory
+  cache_encoded_frames: false       # DISABLED: breaks gradient flow
+  use_torch_compile: false
+  enable_tf32: true
+
+# -----------------------------------------------------------------------------
+# Checkpointing
+# -----------------------------------------------------------------------------
 checkpoint:
   save_freq: 100
   test_freq: 50
   checkpoint_dir: "checkpoints/oasis_grpo"
-  max_checkpoints: 5
 
-# Video saving
+# -----------------------------------------------------------------------------
+# Video Saving
+# -----------------------------------------------------------------------------
 video:
-  save_freq: 50  # Save sample videos every N steps (0 to disable)
+  save_freq: 50
   save_dir: "samples"
 
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
 logging:
   project_name: "oasis_rl_finetuning"
   experiment_name: "grpo_gameworldscore"
   use_wandb: true
   log_interval: 10
-  
-# Device configuration
-device:
-  cuda: true
-  dtype: "float16"  # Options: "float16", "bfloat16", "float32"

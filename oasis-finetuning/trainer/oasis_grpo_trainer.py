@@ -102,7 +102,7 @@ class OasisGRPOConfig:
     total_epochs: int = 10
     total_training_steps: int = 10000
     train_batch_size: int = 1  # Number of unique prompts per step
-    group_size: int = 8  # Number of rollouts per prompt - provides better variance for GRPO
+    group_size: int = 4  # Number of rollouts per prompt - balanced for memory and variance
     grpo_epochs: int = 1  # Number of update epochs per step - optimized for speed
     
     # Rollout settings
@@ -129,7 +129,7 @@ class OasisGRPOConfig:
     
     # Performance optimizations
     dataloader_num_workers: int = 4  # Number of workers for data loading
-    update_micro_batch_size: int = 8  # Micro-batch size for GRPO updates - MUST match group_size for balanced advantages
+    update_micro_batch_size: int = 4  # Micro-batch size for GRPO updates - MUST match group_size for balanced advantages
     use_torch_compile: bool = False  # Enable torch.compile for potential speedup
     enable_tf32: bool = True  # Enable TensorFloat-32 on Ampere+ GPUs
     

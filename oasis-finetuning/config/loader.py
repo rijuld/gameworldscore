@@ -26,6 +26,7 @@ def flatten_config(config: Dict[str, Any]) -> Dict[str, Any]:
     if 'model' in config:
         flat['oasis_ckpt'] = config['model'].get('oasis_ckpt')
         flat['vae_ckpt'] = config['model'].get('vae_ckpt')
+        flat['ddim_steps'] = config['model'].get('ddim_steps', 10)
     
     # Reward
     if 'reward' in config:
@@ -124,6 +125,7 @@ class OasisGRPOConfig:
     oasis_ckpt: str
     vae_ckpt: str
     reward_models_dir: str
+    ddim_steps: int = 10  # DDIM denoising steps (reduce for faster generation)
     
     # Data settings
     data_dir: str

@@ -9,6 +9,7 @@
 # Model Paths
 # -----------------------------------------------------------------------------
 model:
+  ddim_steps: 4             # DDIM denoising steps (default 10, reduce for speed)
   oasis_ckpt: "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/oasis500m.safetensors"
   vae_ckpt: "/home/rd3629/.cache/huggingface/hub/models--Etched--oasis-500m/snapshots/4ca7d2d811f4f0c6fd1d5719bf83f14af3446c0c/vit-l-20.safetensors"
   dit_type: "DiT-S/2"
@@ -34,12 +35,12 @@ reward:
 data:
   data_dir: "Dataset/MiDaS-60_small"
   dataset_type: "auto"      # auto, video, or midas
-  train_batch_size: 1
+  train_batch_size: 2       # Increased for 2 GPUs
   n_prompt_frames: 1
   max_gen_frames: 2         # Reduced for memory optimization
   frame_height: 360
   frame_width: 640
-  num_workers: 4
+  num_workers: 8            # Increased for faster data loading
 
 # -----------------------------------------------------------------------------
 # Training Configuration
@@ -56,9 +57,9 @@ training:
 # GRPO Hyperparameters
 # -----------------------------------------------------------------------------
 grpo:
-  group_size: 4             # Number of rollouts per prompt
-  grpo_epochs: 1            # Update epochs per step (1 = faster)
-  update_micro_batch_size: 4  # MUST equal group_size for balanced advantages
+  group_size: 8             # Increased for 2 GPUs (more rollouts = better advantage estimation)
+  grpo_epochs: 3            # MUST be >1 for ratio to change within step
+  update_micro_batch_size: 8  # MUST equal group_size for balanced advantages
   gamma: 0.99
   lam: 0.95
   clip_ratio: 0.2

@@ -155,7 +155,14 @@ class OasisGRPOTrainer:
             oasis_ckpt=self.config.oasis_ckpt,
             vae_ckpt=self.config.vae_ckpt,
             device=self.config.device,
+            ddim_steps=self.config.ddim_steps,
         )
+        
+        # Multi-GPU support: wrap DiT in DataParallel if multiple GPUs available
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            n_gpus = torch.cuda.device_count()
+            print(f"  Using {n_gpus} GPUs with DataParallel")
+            self.policy.dit = torch.nn.DataParallel(self.policy.dit)
         
         # Clear cache after loading model
         if torch.cuda.is_available():
@@ -192,6 +199,7 @@ class OasisGRPOTrainer:
                 oasis_ckpt=self.config.oasis_ckpt,
                 vae_ckpt=self.config.vae_ckpt,
                 device=ref_device,
+                ddim_steps=self.config.ddim_steps,
             )
             self.ref_policy.eval_mode()
             for param in self.ref_policy.parameters():
@@ -299,8 +307,8 @@ class OasisGRPOTrainer:
             
             def lr_lambda(step):
                 if step < warmup_steps:
-                    # Linear warmup from 0.1x to 1x LR
-                    return 0.1 + 0.9 * (step / warmup_steps)
+                    # Linear warmup from 0.3x to 1x LR (start higher for faster learning)
+                    return 0.3 + 0.7 * (step / warmup_steps)
                 else:
                     # Cosine decay after warmup
                     progress = (step - warmup_steps) / (self.config.total_training_steps - warmup_steps)
@@ -346,11 +354,13 @@ class OasisGRPOTrainer:
         self.policy.eval_mode()
         
         # Disable gradient checkpointing during inference for speed
+        # Handle DataParallel wrapped models
+        dit_module = self.policy.dit.module if hasattr(self.policy.dit, 'module') else self.policy.dit
         if self.use_gradient_checkpointing:
-            if hasattr(self.policy.dit, 'gradient_checkpointing_disable'):
-                self.policy.dit.gradient_checkpointing_disable()
-            elif hasattr(self.policy.dit, 'disable_gradient_checkpointing'):
-                self.policy.dit.disable_gradient_checkpointing()
+            if hasattr(dit_module, 'gradient_checkpointing_disable'):
+                dit_module.gradient_checkpointing_disable()
+            elif hasattr(dit_module, 'disable_gradient_checkpointing'):
+                dit_module.disable_gradient_checkpointing()
         
         B = initial_frames.shape[0]
         G = self.config.group_size
@@ -676,11 +686,13 @@ class OasisGRPOTrainer:
         self.policy.train_mode()
         
         # Enable gradient checkpointing during training for memory efficiency
+        # Handle DataParallel wrapped models
+        dit_module = self.policy.dit.module if hasattr(self.policy.dit, 'module') else self.policy.dit
         if self.use_gradient_checkpointing:
-            if hasattr(self.policy.dit, 'gradient_checkpointing_enable'):
-                self.policy.dit.gradient_checkpointing_enable()
-            elif hasattr(self.policy.dit, 'enable_gradient_checkpointing'):
-                self.policy.dit.enable_gradient_checkpointing()
+            if hasattr(dit_module, 'gradient_checkpointing_enable'):
+                dit_module.gradient_checkpointing_enable()
+            elif hasattr(dit_module, 'enable_gradient_checkpointing'):
+                dit_module.enable_gradient_checkpointing()
         
         B = all_frames.shape[0]
         T_prompt = self.config.n_prompt_frames

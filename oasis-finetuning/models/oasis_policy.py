@@ -92,6 +92,17 @@ class OasisPolicy(nn.Module):
         # Load VAE
         self.vae = OasisVAE(vae_ckpt=vae_ckpt, device=device, dtype=dtype)
         
+        # Freeze VAE - ensure all parameters have requires_grad=False
+        self.vae.eval()
+        for param in self.vae.parameters():
+            param.requires_grad = False
+        
+        # VERIFY: Add assertion to confirm VAE is frozen
+        assert all(not p.requires_grad for p in self.vae.parameters()), \
+            "VAE must be frozen (all parameters should have requires_grad=False)"
+        
+        print("  ✓ VAE frozen (requires_grad=False for all parameters)")
+        
         # Precompute diffusion schedule
         self._setup_diffusion_schedule()
         

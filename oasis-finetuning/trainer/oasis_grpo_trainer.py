@@ -102,8 +102,8 @@ class OasisGRPOConfig:
     total_epochs: int = 10
     total_training_steps: int = 10000
     train_batch_size: int = 1  # Number of unique prompts per step
-    group_size: int = 2  # Number of rollouts per prompt - optimized for memory-speed tradeoff
-    grpo_epochs: int = 2  # Number of update epochs per step - optimized for speed
+    group_size: int = 3  # Number of rollouts per prompt - optimized for memory-speed tradeoff
+    grpo_epochs: int = 1  # Number of update epochs per step - optimized for speed
     
     # Rollout settings
     n_prompt_frames: int = 1
@@ -117,14 +117,13 @@ class OasisGRPOConfig:
     log_ratio_clip: float = 2.0  # Added back for compatibility
     entropy_coeff: float = 0.001
     grad_clip: float = 1.0
-    reward_scale: float = 1.0
+    reward_scale: float = 10.0  # Scaled up for better learning signal
     
     # Memory optimization settings
     use_gradient_checkpointing: bool = True  # Enable gradient checkpointing to save memory
     use_mixed_precision: bool = True  # Enable mixed precision training (FP16)
-    use_mixed_precision: bool = True  # Enable mixed precision training (FP16)
     offload_reward_to_cpu: bool = False  # Offload reward models to CPU to save GPU memory
-    offload_ref_policy_to_cpu: bool = False  # Offload reference policy to CPU (only load to GPU when needed)
+    offload_ref_policy_to_cpu: bool = True  # Offload reference policy to CPU (saves ~14GB GPU memory)
     cache_encoded_frames: bool = False  # DISABLED: Caching prevents gradient flow (causes clip=0)
     kl_compute_freq: int = 5  # Compute KL divergence every N steps (1 = every step)
     
@@ -644,27 +643,10 @@ class OasisGRPOTrainer:
                 )
             
             # Detach rewards to prevent gradient tracking
-            # Detach rewards to prevent gradient tracking
             rewards = rewards.detach()
             
-            # Apply KL penalty if configured
-            if self.config.use_kl_in_reward and log_probs is not None and ref_log_probs is not None:
-                # KL = log_pi - log_ref
-                # Reward = Reward - beta * KL
-                kl = log_probs - ref_log_probs
-                kl_penalty = self.config.kl_coeff * kl
-                
-                # Ensure shapes match
-                if kl_penalty.shape != rewards.shape:
-                    # Try to align shapes if possible (e.g. if rewards are (B,) and KL is (B, T))
-                    # Usually rewards are (B, T-1) and KL is (B, T-1)
-                    pass
-                    
-                rewards = rewards - kl_penalty
-                
-                # Add KL info
-                info['kl_mean'] = kl.mean().item()
-                info['kl_penalty_mean'] = kl_penalty.mean().item()
+            # NOTE: KL penalty is now applied in _grpo_update as a separate loss term
+            # This is more stable than subtracting from rewards before advantage computation
             
         return rewards, info
     
@@ -709,12 +691,19 @@ class OasisGRPOTrainer:
         old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
         noise: torch.Tensor,  # Added noise argument
+        ref_log_probs: Optional[torch.Tensor] = None,  # For KL loss computation
         response_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, float]:
         """
         Perform GRPO policy update using verl's core_algos.
         Uses gradient accumulation and frame caching for optimal memory-speed tradeoff.
+        
+        CRITICAL: noise must be provided and must be the same noise used during rollout
+        generation to ensure consistent log probability computation.
         """
+        # CRITICAL: Assert noise is provided for consistent log prob computation
+        assert noise is not None, "Noise must be provided for consistent log prob computation in GRPO update!"
+        
         self.policy.train_mode()
         
         # Enable gradient checkpointing during training for memory efficiency
@@ -758,6 +747,7 @@ class OasisGRPOTrainer:
             epoch_pg_loss = 0
             epoch_pg_clipfrac = 0
             epoch_ppo_kl = 0
+            epoch_kl_loss = 0
             
             # Process in micro-batches
             for mb_idx in range(num_micro_batches):
@@ -807,6 +797,12 @@ class OasisGRPOTrainer:
                 # Stack log probs
                 log_probs = torch.stack(log_probs, dim=1)
                 
+                # Priority 2: Validate log probs for NaN/Inf
+                if torch.isnan(log_probs).any() or torch.isinf(log_probs).any():
+                    print(f"  WARNING: NaN/Inf in log_probs detected, skipping this micro-batch")
+                    del log_probs
+                    continue
+                
                 # Store in buffer for reuse if needed
                 log_probs_buffer[start_idx:end_idx] = log_probs.detach()
                 
@@ -830,7 +826,24 @@ class OasisGRPOTrainer:
                 entropy_proxy = -log_probs.mean()
                 entropy_loss = -self.config.entropy_coeff * entropy_proxy
                 
-                total_loss = pg_loss + entropy_loss
+                # Priority 1: Compute KL divergence loss (moved from rewards)
+                kl_loss = torch.tensor(0.0, device=self.device)
+                if self.config.use_kl_in_reward and ref_log_probs is not None:
+                    # Get ref_log_probs for this micro-batch
+                    mb_ref_log_probs = ref_log_probs[start_idx:end_idx].detach()
+                    # KL divergence: log_pi - log_ref (approximation)
+                    kl_div = (log_probs - mb_ref_log_probs)
+                    kl_loss = self.config.kl_coeff * kl_div.mean()
+                
+                # Total loss includes KL
+                total_loss = pg_loss + entropy_loss + kl_loss
+                
+                # Priority 2: Validate loss before backward
+                if torch.isnan(total_loss) or torch.isinf(total_loss):
+                    print(f"  WARNING: NaN/Inf loss detected (pg={pg_loss.item():.4f}, "
+                          f"entropy={entropy_loss.item():.4f}, kl={kl_loss.item():.4f}), skipping backward")
+                    self.optimizer.zero_grad()
+                    continue
                 
                 # Scale loss by number of micro-batches for gradient accumulation
                 total_loss = total_loss / num_micro_batches
@@ -845,9 +858,10 @@ class OasisGRPOTrainer:
                 epoch_pg_loss += pg_loss.item()
                 epoch_pg_clipfrac += pg_clipfrac.item()
                 epoch_ppo_kl += ppo_kl.item()
+                epoch_kl_loss += kl_loss.item() if isinstance(kl_loss, torch.Tensor) else kl_loss
                 
                 # Cleanup
-                del log_probs, pg_loss, entropy_loss, total_loss
+                del log_probs, pg_loss, entropy_loss, total_loss, kl_loss
                 del mb_frames, mb_actions, mb_old_log_probs, mb_advantages, mb_response_mask
                 
                 if torch.cuda.is_available():
@@ -860,6 +874,13 @@ class OasisGRPOTrainer:
                     self.policy.get_trainable_parameters(),
                     self.config.grad_clip,
                 )
+                
+                # Check for NaN gradients before optimizer step
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    print(f"  WARNING: NaN/Inf gradient detected (norm={grad_norm}), skipping update")
+                    self.optimizer.zero_grad()
+                    continue
+                
                 self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
             else:
@@ -867,16 +888,24 @@ class OasisGRPOTrainer:
                     self.policy.get_trainable_parameters(),
                     self.config.grad_clip,
                 )
+                
+                # Check for NaN gradients before optimizer step
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    print(f"  WARNING: NaN/Inf gradient detected (norm={grad_norm}), skipping update")
+                    self.optimizer.zero_grad()
+                    continue
+                
                 self.optimizer.step()
             
             successful_updates += 1
             
             # Average metrics over micro-batches
             metrics['pg_loss'].append(epoch_pg_loss / num_micro_batches)
-            metrics['total_loss'].append(epoch_pg_loss / num_micro_batches)
+            metrics['total_loss'].append((epoch_pg_loss + epoch_kl_loss) / num_micro_batches)
             metrics['grad_norm'].append(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
             metrics['clip_fraction'].append(epoch_pg_clipfrac / num_micro_batches)
             metrics['kl'].append(epoch_ppo_kl / num_micro_batches)
+            metrics['kl_loss'].append(epoch_kl_loss / num_micro_batches)
         
         # Clear cached latents to free memory (if they were created)
         if self.config.cache_encoded_frames:
@@ -953,6 +982,15 @@ class OasisGRPOTrainer:
         reward_mean = rewards.mean().item()
         reward_std = rewards.std().item()
         
+        # Priority 5: Add reward scaling check
+        if reward_mean < 0.01:
+            print(f"  WARNING: Very small rewards detected (mean={reward_mean:.6f}). "
+                  f"Consider increasing reward_scale (current={self.config.reward_scale})")
+        
+        if reward_std < 1e-6:
+            print(f"  WARNING: Near-zero reward variance (std={reward_std:.6f}). "
+                  f"Policy may not learn effectively.")
+        
         # Delete rewards after computing advantages
         del rewards
         
@@ -979,6 +1017,7 @@ class OasisGRPOTrainer:
             rollout_log_probs,
             advantages,
             rollout_data['noise'],  # Pass the noise
+            ref_log_probs=rollout_data.get('ref_log_probs'),  # Pass ref_log_probs for KL loss
         )
         grpo_time = time.perf_counter() - grpo_start
         

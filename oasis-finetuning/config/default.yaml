@@ -45,9 +45,9 @@ training:
   total_training_steps: 10000
   grpo_epochs: 4  # Multiple epochs per rollout for sample efficiency
   grpo_mini_batch_size: 1  # Reduced to 1 for memory efficiency
-  learning_rate: 5.0e-7  # Conservative learning rate for stability
+  learning_rate: 3.0e-7  # Reduced from 5e-7 for better stability
   weight_decay: 0.01
-  grad_clip: 1.0  # Gradient clipping threshold
+  grad_clip: 0.5  # Reduced from 1.0 to prevent gradient explosion
   
 # GRPO/PPO hyperparameters (following RLVR-World implementation)
 grpo:

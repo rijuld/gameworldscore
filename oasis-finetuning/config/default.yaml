@@ -21,7 +21,7 @@ reward:
   rik_weight: 1.0  # Inverse Kinematics (action fidelity) - requires VPT IDM
   rtc_weight: 1.0  # Temporal Consistency (CLIP similarity)
   raq_weight: 1.0  # Aesthetic Quality (LAION aesthetic predictor)
-  reward_scale: 1.0  # Scale factor for reward values
+  reward_scale: 100.0  # Strong signal for GRPO advantages
   normalize_weights: true
   use_motion_smoothness: true
 
@@ -43,9 +43,9 @@ data:
 training:
   total_epochs: 10
   total_training_steps: 10000
-  grpo_epochs: 4  # Multiple epochs per rollout for sample efficiency
+  grpo_epochs: 1  # Single epoch for faster iteration
   grpo_mini_batch_size: 1  # Reduced to 1 for memory efficiency
-  learning_rate: 3.0e-7  # Reduced from 5e-7 for better stability
+  learning_rate: 1.0e-4  # Increased for visible learning on DiT
   weight_decay: 0.01
   grad_clip: 0.5  # Reduced from 1.0 to prevent gradient explosion
   

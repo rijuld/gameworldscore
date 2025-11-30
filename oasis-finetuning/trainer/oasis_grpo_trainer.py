@@ -226,6 +226,7 @@ class OasisGRPOTrainer:
             rik_weight=self.config.rik_weight,
             rtc_weight=self.config.rtc_weight,
             raq_weight=self.config.raq_weight,
+            rrg_weight=self.config.rrg_weight,
             require_vpt=self.config.require_vpt,
         )
         

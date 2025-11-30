@@ -1,17 +1,19 @@
 """
 GameWorldScore: Unified ground-truth-free reward function.
 
-Combines three components from the Matrix-Game GameWorldScore benchmark:
+Combines four components for world model training:
 1. RIK (Inverse Kinematics Score) - Action fidelity
 2. RTC (Temporal Consistency Score) - Temporal smoothness
 3. RAQ (Aesthetic Quality Score) - Visual quality
+4. RRG (Reality Grounding Score) - Anti-drift anchoring
 
-R_total = w1 * RIK + w2 * RTC + w3 * RAQ
+R_total = w1 * RIK + w2 * RTC + w3 * RAQ + w4 * RRG
 
 All components are normalized to [0, 1] range:
 - RIK: exp(-cross_entropy_loss), where 1 = perfect action match
 - RTC: (cosine_similarity + 1) / 2, where 1 = identical frames
 - RAQ: sigmoid-normalized aesthetic/quality scores
+- RRG: sigmoid-normalized reality/grounding scores
 
 This enables meaningful weight combinations and consistent training.
 Ideal total reward: ~0.7-0.9 for well-trained models.
@@ -27,6 +29,7 @@ from .inverse_kinematics import InverseKinematicsReward
 from .temporal_consistency import TemporalConsistencyRewardV2 as TemporalConsistencyReward
 from .temporal_consistency import load_temporal_consistency_reward_v2
 from .aesthetic_quality import AestheticQualityReward
+from .reality_grounding import RealityGroundingReward
 
 
 @dataclass
@@ -35,16 +38,18 @@ class RewardWeights:
     rik: float = 1.0
     rtc: float = 1.0
     raq: float = 1.0
+    rrg: float = 0.0  # Reality grounding (anti-drift)
     
     def normalize(self) -> 'RewardWeights':
         """Normalize weights to sum to 1."""
-        total = self.rik + self.rtc + self.raq
+        total = self.rik + self.rtc + self.raq + self.rrg
         if total == 0:
-            return RewardWeights(0.0, 0.0, 0.0)
+            return RewardWeights(0.0, 0.0, 0.0, 0.0)
         return RewardWeights(
             rik=self.rik / total,
             rtc=self.rtc / total,
             raq=self.raq / total,
+            rrg=self.rrg / total,
         )
 
 
@@ -73,6 +78,7 @@ class GameWorldScoreReward(nn.Module):
         rik_weight: float = 1.0,
         rtc_weight: float = 1.0,
         raq_weight: float = 1.0,
+        rrg_weight: float = 0.0,  # Reality grounding (anti-drift)
         normalize_weights: bool = True,
         # Settings
         device: str = "cuda",
@@ -83,7 +89,9 @@ class GameWorldScoreReward(nn.Module):
         self.device = device
         
         # Store weights
-        self.weights = RewardWeights(rik=rik_weight, rtc=rtc_weight, raq=raq_weight)
+        self.weights = RewardWeights(
+            rik=rik_weight, rtc=rtc_weight, raq=raq_weight, rrg=rrg_weight
+        )
         if normalize_weights:
             self.weights = self.weights.normalize()
         
@@ -109,6 +117,19 @@ class GameWorldScoreReward(nn.Module):
             device=device,
             shared_clip_model=None,  # RAQ will load its own CLIP model
         )
+        
+        # RRG: Reality Grounding Reward (anti-drift)
+        # Uses lighter CLIP model to save memory
+        self.rrg = None
+        if rrg_weight > 0:
+            self.rrg = RealityGroundingReward(
+                clip_model_path="openai/clip-vit-base-patch32",  # Lighter model
+                device=device,
+                embed_weight=1.0,
+                texture_weight=0.5,
+                fft_weight=0.3,
+                edge_weight=0.2,
+            )
     
     @torch.no_grad()
     def compute_frame_reward(
@@ -218,11 +239,27 @@ class GameWorldScoreReward(nn.Module):
             raq_info = {}
         raq_time_total = time.perf_counter() - raq_start
         
+        # Time RRG (Reality Grounding - anti-drift)
+        rrg_start = time.perf_counter()
+        if self.weights.rrg > 0 and self.rrg is not None:
+            # RRG evaluates generated frames (skip first context frame)
+            gen_frames = frames[:, 1:]  # (B, T-1, C, H, W)
+            B, T_gen = gen_frames.shape[:2]
+            # Flatten for batch processing
+            gen_frames_flat = gen_frames.reshape(B * T_gen, *gen_frames.shape[2:])
+            rrg_rewards_flat, rrg_info = self.rrg.compute_reward(gen_frames_flat)
+            rrg_rewards = rrg_rewards_flat.reshape(B, T_gen)
+        else:
+            rrg_rewards = torch.zeros(frames.shape[0], frames.shape[1]-1, device=self.device)
+            rrg_info = {}
+        rrg_time_total = time.perf_counter() - rrg_start
+        
         # Weighted combination: (B, T-1)
         frame_rewards = (
             self.weights.rik * rik_rewards +
             self.weights.rtc * rtc_rewards +
-            self.weights.raq * raq_rewards
+            self.weights.raq * raq_rewards +
+            self.weights.rrg * rrg_rewards
         )
         
         # Aggregate info
@@ -231,10 +268,12 @@ class GameWorldScoreReward(nn.Module):
             'rik_reward': rik_rewards.mean().item(),
             'rtc_reward': rtc_rewards.mean().item(),
             'raq_reward': raq_rewards.mean().item(),
+            'rrg_reward': rrg_rewards.mean().item(),
             # Timing info
             'time_rik_sec': rik_time_total,
             'time_rtc_sec': rtc_time_total,
             'time_raq_sec': raq_time_total,
+            'time_rrg_sec': rrg_time_total,
         }
         
         # Add sub-reward info if available
@@ -248,6 +287,10 @@ class GameWorldScoreReward(nn.Module):
             info['raq_aesthetic_score'] = raq_info.get('raq_aesthetic_score', 0.0)
         if 'raq_quality_score' in raq_info:
             info['raq_quality_score'] = raq_info.get('raq_quality_score', 0.0)
+        # Add RRG sub-info
+        for key in ['reality_embed_sim', 'reality_texture', 'reality_fft', 'reality_edge']:
+            if key in rrg_info:
+                info[key] = rrg_info[key]
         
         if return_per_frame:
             return frame_rewards, info
@@ -305,6 +348,7 @@ def create_game_world_score_reward(
     rik_weight: float = 1.0,
     rtc_weight: float = 1.0,
     raq_weight: float = 1.0,
+    rrg_weight: float = 0.0,
     require_vpt: bool = True,
 ) -> GameWorldScoreReward:
     """
@@ -322,6 +366,7 @@ def create_game_world_score_reward(
         rik_weight: Weight for RIK component
         rtc_weight: Weight for RTC component
         raq_weight: Weight for RAQ component
+        rrg_weight: Weight for RRG component (Reality Grounding, anti-drift)
         require_vpt: If True, raise error when VPT IDM cannot be loaded.
                      If False, fall back to SimpleIDM (less accurate).
         
@@ -353,6 +398,7 @@ def create_game_world_score_reward(
         rik_weight=rik_weight,
         rtc_weight=rtc_weight,
         raq_weight=raq_weight,
+        rrg_weight=rrg_weight,
         device=device,
         require_vpt=require_vpt,
     )

@@ -23,10 +23,10 @@ reward:
   idm_weights_path: "models_for_rl_finetuning/4x_idm.weights"
   require_vpt: true
   # GameWorldScore component weights
-  rik_weight: 1.0           # Inverse Kinematics (action fidelity)
-  rtc_weight: 0           # Temporal Consistency (CLIP similarity)
-  raq_weight: 0.1           # Aesthetic Quality (LAION aesthetic)
-  rrg_weight: 1           # Reality Grounding (anti-drift) - NEW!
+  rik_weight: 1           # Inverse Kinematics (action fidelity)
+  rtc_weight: 1             # Temporal Consistency (CLIP similarity)
+  raq_weight: 0           # Aesthetic Quality (LAION aesthetic)
+  rrg_weight: 1             # Reality Grounding (anti-drift) - NEW!
   use_motion_smoothness: true
   add_reward_noise: true    # Add small noise to break reward ties
 
@@ -59,7 +59,7 @@ training:
 # -----------------------------------------------------------------------------
 grpo:
   group_size: 8             # Number of rollouts per prompt (Increased to 8)
-  grpo_epochs: 3            # MUST be >1 for ratio to change within step
+  grpo_epochs: 4            # MUST be >1 for ratio to change within step
   update_micro_batch_size: 8  # MUST equal group_size for balanced advantages
   gamma: 0.99
   lam: 0.95

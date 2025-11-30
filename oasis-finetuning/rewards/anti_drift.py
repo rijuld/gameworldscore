@@ -322,6 +322,8 @@ class AntiDriftReward(nn.Module):
                 frames[:, t + 1],
                 actions[:, t],
             )
+            if t == 0:
+                print(f"  [AntiDrift] Frame 0: Sharpness={info['sharpness']:.4f}, Motion={info['motion_magnitude']:.4f}, Texture={info['texture_reward']:.4f}, Grid={info['grid_penalty']:.4f}, Total={reward.mean().item():.4f}")
             frame_rewards.append(reward)
             all_sharpness.append(info['sharpness'])
             all_motion.append(info['motion_magnitude'])

@@ -94,8 +94,10 @@ class GameWorldScoreReward(nn.Module):
         self.weights = RewardWeights(
             rik=rik_weight, rtc=rtc_weight, raq=raq_weight, rrg=rrg_weight, anti_drift=anti_drift_weight
         )
+        print(f"  [GameWorldScore] Initialized with weights: {self.weights}")
         if normalize_weights:
             self.weights = self.weights.normalize()
+            print(f"  [GameWorldScore] Normalized weights: {self.weights}")
         
         # Initialize reward components
         self.rik = InverseKinematicsReward(

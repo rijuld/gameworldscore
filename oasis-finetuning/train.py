@@ -20,6 +20,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
+import glob
 
 # Add the oasis-finetuning directory to sys.path for proper imports
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -80,6 +81,21 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+def get_latest_checkpoint(checkpoint_dir: str) -> str:
+    """Find the latest checkpoint in the directory."""
+    if not os.path.exists(checkpoint_dir):
+        return None
+        
+    # Look for .pt files
+    checkpoints = glob.glob(os.path.join(checkpoint_dir, "*.pt"))
+    if not checkpoints:
+        return None
+        
+    # Sort by modification time (newest first)
+    checkpoints.sort(key=os.path.getmtime, reverse=True)
+    return checkpoints[0]
+
+
 def main():
     args = parse_args()
     
@@ -137,6 +153,12 @@ def main():
     # Resume from checkpoint if specified
     if args.resume_from is not None:
         trainer.load_checkpoint(args.resume_from)
+    elif config.auto_resume:
+        # Try to find latest checkpoint
+        latest_ckpt = get_latest_checkpoint(config.checkpoint_dir)
+        if latest_ckpt:
+            print(f"Auto-resuming from latest checkpoint: {latest_ckpt}")
+            trainer.load_checkpoint(latest_ckpt)
     
     # Start training
     print("\nStarting training...")

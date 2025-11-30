@@ -99,6 +99,7 @@ def flatten_config(config: Dict[str, Any]) -> Dict[str, Any]:
         flat['save_freq'] = c.get('save_freq')
         flat['test_freq'] = c.get('test_freq')
         flat['checkpoint_dir'] = c.get('checkpoint_dir')
+        flat['auto_resume'] = c.get('auto_resume', True)
     
     # Video
     if 'video' in config:
@@ -187,6 +188,7 @@ class OasisGRPOConfig:
     save_freq: int
     test_freq: int
     checkpoint_dir: str
+    auto_resume: bool
     
     # Video saving
     video_save_freq: int

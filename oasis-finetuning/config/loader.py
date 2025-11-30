@@ -125,7 +125,6 @@ class OasisGRPOConfig:
     oasis_ckpt: str
     vae_ckpt: str
     reward_models_dir: str
-    ddim_steps: int = 10  # DDIM denoising steps
     
     # Data settings
     data_dir: str
@@ -199,6 +198,9 @@ class OasisGRPOConfig:
     
     # Device
     device: str
+    
+    # Optional with defaults (must come last in dataclass)
+    ddim_steps: int = 10  # DDIM denoising steps
 
 
 def load_config(config_path: str = DEFAULT_CONFIG_PATH, **overrides) -> OasisGRPOConfig:

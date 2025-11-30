@@ -468,12 +468,19 @@ def create_minecraft_dataloader(
         
         return result
     
+    # Extract optional dataloader settings from kwargs
+    pin_memory = kwargs.pop('pin_memory', True)
+    prefetch_factor = kwargs.pop('prefetch_factor', 2)
+    persistent_workers = num_workers > 0  # Keep workers alive between batches
+    
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=persistent_workers,
         collate_fn=collate_fn,
     )
 

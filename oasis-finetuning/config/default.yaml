@@ -35,12 +35,14 @@ reward:
 data:
   data_dir: "Dataset/MiDaS-60_small"
   dataset_type: "auto"      # auto, video, or midas
-  train_batch_size: 2       # Increased for 2 GPUs
+  train_batch_size: 4       # Maximized for 2 GPUs
   n_prompt_frames: 1
   max_gen_frames: 2         # Reduced for memory optimization
   frame_height: 360
   frame_width: 640
-  num_workers: 8            # Increased for faster data loading
+  num_workers: 16           # Maximized for parallel data loading
+  pin_memory: true          # Faster CPU->GPU transfer
+  prefetch_factor: 4        # Prefetch batches
 
 # -----------------------------------------------------------------------------
 # Training Configuration
@@ -86,8 +88,10 @@ memory:
   offload_reward_to_cpu: false
   offload_ref_policy_to_cpu: true   # Saves ~14GB GPU memory
   cache_encoded_frames: false       # DISABLED: breaks gradient flow
-  use_torch_compile: false
-  enable_tf32: true
+  use_torch_compile: true           # JIT compile for speed (may have startup cost)
+  enable_tf32: true                 # Fast TF32 on Ampere GPUs
+  cudnn_benchmark: true             # Auto-tune convolutions
+  non_blocking: true                # Async GPU transfers
 
 # -----------------------------------------------------------------------------
 # Checkpointing

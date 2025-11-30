@@ -118,16 +118,21 @@ class OasisGRPOTrainer:
             print(f"⚠️  OVERRIDE: Setting update_micro_batch_size from {self.config.update_micro_batch_size} to {self.config.group_size}")
             self.config.update_micro_batch_size = self.config.group_size
         
-        # FORCE OVERRIDE: Ensure grpo_epochs is 1 for efficiency
-        if self.config.grpo_epochs != 1:
-            print(f"⚠️  OVERRIDE: Setting grpo_epochs from {self.config.grpo_epochs} to 1")
-            self.config.grpo_epochs = 1
+        # Performance optimizations
+        if torch.cuda.is_available():
+            # Enable TF32 for faster matrix multiplications on Ampere+ GPUs
+            if config.enable_tf32:
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                print("  Enabled TensorFloat-32 (TF32) for faster training")
+            
+            # Enable cuDNN benchmark for auto-tuned convolutions
+            if config.cudnn_benchmark:
+                torch.backends.cudnn.benchmark = True
+                print("  Enabled cuDNN benchmark mode")
         
-        # Enable TF32 for faster matrix multiplications on Ampere+ GPUs
-        if config.enable_tf32 and torch.cuda.is_available():
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            print("  Enabled TensorFloat-32 (TF32) for faster training")
+        # Store non_blocking setting for tensor transfers
+        self.non_blocking = config.non_blocking
         
         # Initialize components
         self._init_policy()
@@ -281,6 +286,8 @@ class OasisGRPOTrainer:
                 frame_size=self.config.frame_size,
                 split="train",
                 num_workers=self.config.dataloader_num_workers,
+                pin_memory=self.config.pin_memory,
+                prefetch_factor=self.config.prefetch_factor,
             )
         else:
             print(f"Warning: Data directory {data_dir} not found.")
@@ -969,15 +976,16 @@ class OasisGRPOTrainer:
             torch.cuda.synchronize()
         gc.collect()
         
-        # Prepare inputs
+        # Prepare inputs (use non_blocking for async transfers from pinned memory)
+        nb = self.non_blocking
         if 'initial_frame' in batch:
-            initial_frames = batch['initial_frame'].to(self.device)
+            initial_frames = batch['initial_frame'].to(self.device, non_blocking=nb)
         else:
-            frames = batch['frames'].to(self.device)
+            frames = batch['frames'].to(self.device, non_blocking=nb)
             initial_frames = frames[:, :self.config.n_prompt_frames]
             del frames  # Free memory immediately
         
-        actions = batch['actions'].to(self.device)
+        actions = batch['actions'].to(self.device, non_blocking=nb)
         target_actions = actions[:, :self.config.max_gen_frames]
         
         # 1. Generate rollouts (with group repetition)

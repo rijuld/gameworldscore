@@ -49,6 +49,8 @@ def flatten_config(config: Dict[str, Any]) -> Dict[str, Any]:
         flat['max_gen_frames'] = d.get('max_gen_frames')
         flat['frame_size'] = (d.get('frame_height'), d.get('frame_width'))
         flat['dataloader_num_workers'] = d.get('num_workers')
+        flat['pin_memory'] = d.get('pin_memory', True)
+        flat['prefetch_factor'] = d.get('prefetch_factor', 2)
     
     # Training
     if 'training' in config:
@@ -91,6 +93,8 @@ def flatten_config(config: Dict[str, Any]) -> Dict[str, Any]:
         flat['cache_encoded_frames'] = m.get('cache_encoded_frames')
         flat['use_torch_compile'] = m.get('use_torch_compile')
         flat['enable_tf32'] = m.get('enable_tf32')
+        flat['cudnn_benchmark'] = m.get('cudnn_benchmark', True)
+        flat['non_blocking'] = m.get('non_blocking', True)
     
     # Checkpoint
     if 'checkpoint' in config:
@@ -201,6 +205,10 @@ class OasisGRPOConfig:
     
     # Optional with defaults (must come after required fields)
     ddim_steps: int = 10  # DDIM denoising steps (reduce for faster generation)
+    pin_memory: bool = True  # Pin memory for faster CPU->GPU transfer
+    prefetch_factor: int = 2  # Prefetch batches in dataloader
+    cudnn_benchmark: bool = True  # Auto-tune convolutions
+    non_blocking: bool = True  # Async GPU transfers
 
 
 def load_config(config_path: str = DEFAULT_CONFIG_PATH, **overrides) -> OasisGRPOConfig:

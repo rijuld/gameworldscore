@@ -24,10 +24,10 @@ reward:
   require_vpt: true
   # GameWorldScore component weights
   rik_weight: 1           # Inverse Kinematics (action fidelity) - FIXED: Enabled at 0.5
-  rtc_weight: 0           # Temporal Consistency (CLIP similarity) - FIXED: Enabled at 0.3
-  raq_weight: 0.0           # Aesthetic Quality (LAION aesthetic)
-  rrg_weight: 0           # Reality Grounding (anti-drift)
-  anti_drift_weight: 0    # Anti-Drift (Sharpness/Motion/Texture) - FIXED: Set to 1.0
+  rtc_weight: 1           # Temporal Consistency (CLIP similarity) - FIXED: Enabled at 0.3
+  raq_weight: 1           # Aesthetic Quality (LAION aesthetic)
+  rrg_weight: 1           # Reality Grounding (anti-drift)
+  anti_drift_weight: 1    # Anti-Drift (Sharpness/Motion/Texture) - FIXED: Set to 1.0
   use_motion_smoothness: true
   add_reward_noise: true    # Add small noise to break reward ties
 

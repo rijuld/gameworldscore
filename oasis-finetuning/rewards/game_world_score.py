@@ -141,7 +141,7 @@ class GameWorldScoreReward(nn.Module):
             self.anti_drift = AntiDriftReward(
                 device=device,
                 sharpness_weight=1.0,
-                motion_weight=2.0,
+                motion_weight=8.0,  # FIXED: Increased to 4.0 to strongly force motion
                 texture_weight=0.8,
                 anti_grid_weight=0.5,
             )

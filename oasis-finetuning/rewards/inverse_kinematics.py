@@ -197,8 +197,16 @@ class VPTIDMWrapper(nn.Module):
         result = {}
         for key in all_predictions[0].keys():
             # Take the second prediction (transition from t to t+1)
-            result[key] = np.stack([p[key][0, 1] if p[key].ndim > 1 else p[key][1] 
-                                   for p in all_predictions])
+            # Take the prediction
+            if key == 'camera':
+                # Camera is (1, 2) - we want (2,)
+                # p[key] is (1, 2), take p[key][0] -> (2,)
+                result[key] = np.stack([p[key][0] for p in all_predictions])
+            else:
+                # Buttons are (1, 2) softmax or (1,) sigmoid
+                # We want probability of class 1 (pressed)
+                result[key] = np.stack([p[key][0, 1] if p[key].ndim > 1 else p[key][0] 
+                                       for p in all_predictions])
         
         return result
 
@@ -345,9 +353,10 @@ class InverseKinematicsReward(nn.Module):
             intended_val = intended_action[:, i]  # (B,)
             
             if key == "cameraX":
-                # VPT predicts 'camera' as [dy, dx] (pitch, yaw)
-                # Oasis cameraX is camera[0] -> index 0
-                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 0]
+                # VPT predicts 'camera' as [pitch, yaw] (MineRL standard)
+                # Oasis cameraX is Yaw (horizontal)
+                # So we want index 1 from VPT
+                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 1]
                 pred_val = torch.from_numpy(pred_val_np).to(self.device).float()
                 
                 # Normalize predicted value to match Oasis range [-1, 1] roughly
@@ -380,9 +389,10 @@ class InverseKinematicsReward(nn.Module):
                 total_actions_checked += 1
                 
             elif key == "cameraY":
-                # VPT predicts 'camera' as [dy, dx] (pitch, yaw)
-                # Oasis cameraY is camera[1] -> index 1
-                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 1]
+                # VPT predicts 'camera' as [pitch, yaw]
+                # Oasis cameraY is Pitch (vertical)
+                # So we want index 0 from VPT
+                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 0]
                 pred_val = torch.from_numpy(pred_val_np).to(self.device).float()
                 
                 threshold = 0.05

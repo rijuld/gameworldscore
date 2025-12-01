@@ -81,11 +81,11 @@ class TemporalConsistencyRewardV2(nn.Module):
         reward_type='reciprocal',   # safe for batch size = 1
         alpha=1.0,                  # only used if reward_type='exp'
         use_ssim=True,
-        ssim_weight=0.5,
-        l1_weight=0.5,
-        tv_weight=0.02,
-        fb_weight=0.1,
-        multiscale=[1.0, 0.5],
+        ssim_weight=0.3,            # FIXED: Lower for Minecraft (blocky)
+        l1_weight=0.7,              # FIXED: Higher for Minecraft (edges)
+        tv_weight=0.0,              # FIXED: Disabled (allows sudden changes)
+        fb_weight=0.02,             # FIXED: Lower (allows fast camera)
+        multiscale=[1.0, 0.75],     # FIXED: Better for 16x16 blocks
         normalize_rewards=False,    # batch size 1 → keep False!
         debug=False
     ):

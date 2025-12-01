@@ -391,6 +391,9 @@ class InverseKinematicsReward(nn.Module):
                         torch.tensor(0.0, device=self.device) # Mismatch
                     )
                 )
+
+                # Ensure match is (B,) even if extra dimensions appear
+                match = match.view(B, -1).mean(dim=1)
                 total_reward += match
                 total_actions_checked += 1
                 
@@ -417,6 +420,9 @@ class InverseKinematicsReward(nn.Module):
                         torch.tensor(0.0, device=self.device)
                     )
                 )
+
+                # Ensure match is (B,) even if extra dimensions appear
+                match = match.view(B, -1).mean(dim=1)
                 total_reward += match
                 total_actions_checked += 1
                 
@@ -439,12 +445,17 @@ class InverseKinematicsReward(nn.Module):
                 # So it should be probability of class 1
                 
                 pred_prob = torch.from_numpy(pred_prob_np).to(self.device).float()
+
+                # Ensure predicted probability is (B,) even if extra dimensions appear
+                pred_prob = pred_prob.view(B, -1).mean(dim=1)
                 
                 # Intended is 0 or 1
                 # Reward = 1 - |intended - pred|
                 # Or binary match with threshold
                 
                 match = 1.0 - (intended_val - pred_prob).abs()
+                # match should already be (B,), but enforce shape for safety
+                match = match.view(B, -1).mean(dim=1)
                 total_reward += match
                 total_actions_checked += 1
         

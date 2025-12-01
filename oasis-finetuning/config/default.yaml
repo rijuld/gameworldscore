@@ -75,8 +75,8 @@ grpo:
 # -----------------------------------------------------------------------------
 kl:
   use_kl_in_reward: true
-  kl_coeff: 0.01            # FIXED: Reduced (was 0.05) to allow more exploration
-  kl_target: 0.2            # FIXED: Increased (was 0.1) to allow more drift
+  kl_coeff: 0.5             # FIXED: Increased drastically (was 0.01) to force policy to stay close
+  kl_target: 0.01           # FIXED: Decreased (was 0.2) to tighten constraint
   kl_compute_freq: 5        # Compute KL every N steps
 
 # -----------------------------------------------------------------------------

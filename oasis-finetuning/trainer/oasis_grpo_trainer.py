@@ -580,6 +580,9 @@ class OasisGRPOTrainer:
         Compute advantages using verl's implementation.
         """
         # Scale rewards
+        # Fix 4: Clamp rewards to prevent outliers
+        rewards = torch.clamp(rewards, min=-10.0, max=10.0)
+        
         scaled_rewards = rewards * self.config.reward_scale
         
         # Add tiny noise to break ties and ensure variance (Fix 3)

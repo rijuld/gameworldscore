@@ -23,11 +23,11 @@ reward:
   idm_weights_path: "models_for_rl_finetuning/4x_idm.weights"
   require_vpt: true
   # GameWorldScore component weights
-  rik_weight: 0           # Inverse Kinematics (action fidelity)
-  rtc_weight: 0           # Temporal Consistency (CLIP similarity) - FIXED: Reduced to 0.5
-  raq_weight: 0           # Aesthetic Quality (LAION aesthetic) - FIXED: Disabled
-  rrg_weight: 0           # Reality Grounding (anti-drift)
-  anti_drift_weight: 1    # Anti-Drift (Sharpness/Motion/Texture) - NEW!
+  rik_weight: 0.5           # Inverse Kinematics (action fidelity) - FIXED: Enabled at 0.5
+  rtc_weight: 0.3           # Temporal Consistency (CLIP similarity) - FIXED: Enabled at 0.3
+  raq_weight: 0.0           # Aesthetic Quality (LAION aesthetic)
+  rrg_weight: 0.0           # Reality Grounding (anti-drift)
+  anti_drift_weight: 1.0    # Anti-Drift (Sharpness/Motion/Texture) - FIXED: Set to 1.0
   use_motion_smoothness: true
   add_reward_noise: true    # Add small noise to break reward ties
 
@@ -50,24 +50,24 @@ data:
 training:
   total_epochs: 10
   total_training_steps: 10000
-  learning_rate: 2.0e-6     # FIXED: Reverted to 2.0e-6 for stability
+  learning_rate: 1.0e-5     # FIXED: Increased to 1e-5 as requested
   weight_decay: 0.01
-  grad_clip: 0.1            # FIXED: Much stricter clipping (was 0.5) to prevent explosions
+  grad_clip: 1.0            # FIXED: Set to 1.0 as requested
   device: "cuda"
 
 # -----------------------------------------------------------------------------
 # GRPO Hyperparameters
 # -----------------------------------------------------------------------------
 grpo:
-  group_size: 8             # Number of rollouts per prompt (Increased to 8)
-  grpo_epochs: 4            # MUST be >1 for ratio to change within step
-  update_micro_batch_size: 8  # MUST equal group_size for balanced advantages
+  group_size: 8             # Number of rollouts per prompt
+  grpo_epochs: 2            # FIXED: Reduced to 2 to prevent instability
+  update_micro_batch_size: 8
   gamma: 0.99
   lam: 0.95
   clip_ratio: 0.2
-  log_ratio_clip: 0.2       # FIXED: Tighter clamp (was 2.0) to prevent extreme ratios
+  log_ratio_clip: 0.2
   entropy_coeff: 0.001
-  reward_scale: 10.0        # FIXED: Reverted to 10.0 (safe with advantage normalization)
+  reward_scale: 10.0
   adv_estimator: "grpo"     # grpo, reinforce_plus_plus, or gae
 
 # -----------------------------------------------------------------------------

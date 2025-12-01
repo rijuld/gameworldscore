@@ -36,6 +36,7 @@ def flatten_config(config: Dict[str, Any]) -> Dict[str, Any]:
         flat['rtc_weight'] = r.get('rtc_weight')
         flat['raq_weight'] = r.get('raq_weight')
         flat['rrg_weight'] = r.get('rrg_weight', 0.0)
+        flat['anti_drift_weight'] = r.get('anti_drift_weight', 0.0)
         flat['require_vpt'] = r.get('require_vpt')
         flat['use_motion_smoothness'] = r.get('use_motion_smoothness')
         flat['add_reward_noise'] = r.get('add_reward_noise')
@@ -205,6 +206,7 @@ class OasisGRPOConfig:
     # Optional with defaults (must come last in dataclass)
     ddim_steps: int = 10  # DDIM denoising steps
     rrg_weight: float = 0.0  # Reality Grounding (anti-drift)
+    anti_drift_weight: float = 0.0  # New Anti-Drift Reward
 
 
 def load_config(config_path: str = DEFAULT_CONFIG_PATH, **overrides) -> OasisGRPOConfig:
@@ -253,4 +255,6 @@ def print_config(config: OasisGRPOConfig):
     print(f"    rik_weight: {config.rik_weight}")
     print(f"    rtc_weight: {config.rtc_weight}")
     print(f"    raq_weight: {config.raq_weight}")
+    print(f"    rrg_weight: {config.rrg_weight}")
+    print(f"    anti_drift_weight: {config.anti_drift_weight}")
     print("=" * 60)

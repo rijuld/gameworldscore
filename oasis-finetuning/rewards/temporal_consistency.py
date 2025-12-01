@@ -81,11 +81,11 @@ class TemporalConsistencyRewardV2(nn.Module):
         reward_type='reciprocal',   # safe for batch size = 1
         alpha=1.0,                  # only used if reward_type='exp'
         use_ssim=True,
-        ssim_weight=0.3,            # FIXED: Lower for Minecraft (blocky)
-        l1_weight=0.7,              # FIXED: Higher for Minecraft (edges)
-        tv_weight=0.0,              # FIXED: Disabled (allows sudden changes)
-        fb_weight=0.02,             # FIXED: Lower (allows fast camera)
-        multiscale=[1.0, 0.75],     # FIXED: Better for 16x16 blocks
+        ssim_weight=0.4,            # FIXED: Balanced to prevent L1 grid artifacts
+        l1_weight=0.6,              # FIXED: Reduced slightly
+        tv_weight=0.01,             # FIXED: Re-enabled small TV to kill grid artifacts
+        fb_weight=0.02,             # Keep low for fast motion
+        multiscale=[1.0, 0.5],      # FIXED: Reverted to powers of 2 to avoid aliasing
         normalize_rewards=False,    # batch size 1 → keep False!
         debug=False
     ):
@@ -224,7 +224,7 @@ class TemporalConsistencyRewardV2(nn.Module):
     # -------------------------------- Public API -------------------------------------- #
 
     @torch.no_grad()
-    def compute_reward(self, t, t1):
+    def compute_reward(self, t, t1, action_magnitude=None):
         t = t.to(self.device)
         t1 = t1.to(self.device)
 
@@ -233,6 +233,16 @@ class TemporalConsistencyRewardV2(nn.Module):
         tv_loss = self._tv(t, t1)
 
         total = p_loss + self.fb_weight * fb_loss + self.tv_weight * tv_loss
+        
+        # Action-Aware Masking: Reduce penalty when large action is taken
+        if action_magnitude is not None:
+            if action_magnitude.device != self.device:
+                action_magnitude = action_magnitude.to(self.device)
+            
+            # Scale loss: 1.0 (no action) -> 0.5 (max action)
+            # This allows the model to make large changes when requested
+            expected_motion_scale = 1.0 - 0.5 * action_magnitude
+            total = total * expected_motion_scale
 
         if self.debug:
             print(f"[RTC] Photo={p_loss.item():.6f}, FB={fb_loss.item():.6f}, TV={tv_loss.item():.6f}, Total={total.item():.6f}")
@@ -267,7 +277,7 @@ class TemporalConsistencyRewardV2(nn.Module):
         }
 
     @torch.no_grad()
-    def compute_sequence_reward(self, frames):
+    def compute_sequence_reward(self, frames, action_magnitude=None):
         B, T = frames.shape[:2]
 
         if T < 2:
@@ -275,8 +285,14 @@ class TemporalConsistencyRewardV2(nn.Module):
 
         t = frames[:, :-1].reshape(-1, *frames.shape[2:])
         t1 = frames[:, 1:].reshape(-1, *frames.shape[2:])
+        
+        # Reshape action magnitude if provided
+        flat_action_magnitude = None
+        if action_magnitude is not None:
+            # action_magnitude is (B, T-1) -> (B*(T-1),)
+            flat_action_magnitude = action_magnitude.reshape(-1)
 
-        rewards, info = self.compute_reward(t, t1)
+        rewards, info = self.compute_reward(t, t1, action_magnitude=flat_action_magnitude)
 
         rewards = rewards.reshape(B, T - 1)
 

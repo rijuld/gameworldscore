@@ -196,6 +196,45 @@ class GameWorldScoreReward(nn.Module):
         
         return total_reward, info
     
+    def _compute_action_magnitude(self, actions: torch.Tensor) -> torch.Tensor:
+        """
+        Estimate how much motion an action should cause.
+        
+        Args:
+            actions: (B, T, action_dim) or (B, action_dim)
+            
+        Returns:
+            magnitude: (B, T) or (B,) in [0, 1]
+        """
+        # Ensure actions are on correct device
+        if actions.device != self.device:
+            actions = actions.to(self.device)
+            
+        from data.action_utils import ACTION_KEYS
+        
+        # Camera actions (indices 0 and 1 usually, but check keys)
+        cam_x_idx = ACTION_KEYS.index("cameraX") if "cameraX" in ACTION_KEYS else 0
+        cam_y_idx = ACTION_KEYS.index("cameraY") if "cameraY" in ACTION_KEYS else 1
+        
+        # Movement actions
+        move_keys = ["forward", "back", "left", "right", "jump", "sneak"]
+        move_indices = [ACTION_KEYS.index(k) for k in move_keys if k in ACTION_KEYS]
+        
+        # Calculate magnitude
+        # Camera motion is most significant for visual change
+        camera_motion = actions[..., cam_x_idx].abs() + actions[..., cam_y_idx].abs()
+        
+        # Movement adds some expectation of change
+        if move_indices:
+            movement = actions[..., move_indices].sum(dim=-1)
+        else:
+            movement = torch.zeros_like(camera_motion)
+            
+        # Combine and clamp
+        magnitude = torch.clamp(camera_motion + movement * 0.3, 0, 1)
+        
+        return magnitude
+    
     @torch.no_grad()
     def compute_sequence_reward(
         self,
@@ -237,7 +276,13 @@ class GameWorldScoreReward(nn.Module):
         # Time RTC (batched)
         rtc_start = time.perf_counter()
         if self.weights.rtc > 0:
-            rtc_rewards, rtc_info = self.rtc.compute_sequence_reward(frames)
+            # Compute action magnitude for masking
+            action_magnitude = self._compute_action_magnitude(actions)
+            
+            rtc_rewards, rtc_info = self.rtc.compute_sequence_reward(
+                frames, 
+                action_magnitude=action_magnitude
+            )
         else:
             rtc_rewards = torch.zeros(frames.shape[0], frames.shape[1]-1, device=self.device)
             rtc_info = {}

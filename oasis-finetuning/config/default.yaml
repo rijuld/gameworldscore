@@ -39,7 +39,7 @@ data:
   dataset_type: "screenshots"      # screenshots, auto, video, or midas
   train_batch_size: 1
   n_prompt_frames: 1
-  max_gen_frames: 8         # Reduced for memory optimization
+  max_gen_frames: 2         # Reduced for memory optimization
   frame_height: 360
   frame_width: 640
   num_workers: 4

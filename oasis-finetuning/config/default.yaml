@@ -38,8 +38,8 @@ data:
   data_dir: "Dataset/screenshots"
   dataset_type: "screenshots"      # screenshots, auto, video, or midas
   train_batch_size: 1
-  n_prompt_frames: 1
-  max_gen_frames: 2         # Reduced for memory optimization
+  n_prompt_frames: 8
+  max_gen_frames: 8         # Reduced for memory optimization
   frame_height: 360
   frame_width: 640
   num_workers: 4
@@ -50,7 +50,7 @@ data:
 training:
   total_epochs: 10
   total_training_steps: 10000
-  learning_rate: 1.0e-5     # FIXED: Increased to 1e-5 as requested
+  learning_rate: 5.0e-6     # FIXED: Increased to 1e-5 as requested
   weight_decay: 0.01
   grad_clip: 1.0            # FIXED: Set to 1.0 as requested
   device: "cuda"
@@ -75,7 +75,7 @@ grpo:
 # -----------------------------------------------------------------------------
 kl:
   use_kl_in_reward: true
-  kl_coeff: 0.5             # FIXED: Increased drastically (was 0.01) to force policy to stay close
+  kl_coeff: 0.8             # FIXED: Increased drastically (was 0.01) to force policy to stay close
   kl_target: 0.01           # FIXED: Decreased (was 0.2) to tighten constraint
   kl_compute_freq: 5        # Compute KL every N steps
 

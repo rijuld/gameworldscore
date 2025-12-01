@@ -78,6 +78,7 @@ kl:
   kl_coeff: 0.8             # FIXED: Increased drastically (was 0.01) to force policy to stay close
   kl_target: 0.01           # FIXED: Decreased (was 0.2) to tighten constraint
   kl_compute_freq: 5        # Compute KL every N steps
+  use_adaptive_kl: false    # FIXED: Disabled adaptive KL as requested
 
 # -----------------------------------------------------------------------------
 # Memory Optimization

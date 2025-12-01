@@ -356,7 +356,13 @@ class InverseKinematicsReward(nn.Module):
                 # VPT predicts 'camera' as [pitch, yaw] (MineRL standard)
                 # Oasis cameraX is Yaw (horizontal)
                 # So we want index 1 from VPT
-                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 1]
+                # predictions['camera'] is (B, 2)
+                camera_preds = predictions.get('camera', np.zeros((B, 2)))
+                if camera_preds.shape[0] != B:
+                    # Fallback if batch size mismatch (shouldn't happen but safe)
+                    camera_preds = np.zeros((B, 2))
+                
+                pred_val_np = camera_preds[:, 1]
                 pred_val = torch.from_numpy(pred_val_np).to(self.device).float()
                 
                 # Normalize predicted value to match Oasis range [-1, 1] roughly
@@ -392,7 +398,11 @@ class InverseKinematicsReward(nn.Module):
                 # VPT predicts 'camera' as [pitch, yaw]
                 # Oasis cameraY is Pitch (vertical)
                 # So we want index 0 from VPT
-                pred_val_np = predictions.get('camera', np.zeros((B, 2)))[:, 0]
+                camera_preds = predictions.get('camera', np.zeros((B, 2)))
+                if camera_preds.shape[0] != B:
+                    camera_preds = np.zeros((B, 2))
+                    
+                pred_val_np = camera_preds[:, 0]
                 pred_val = torch.from_numpy(pred_val_np).to(self.device).float()
                 
                 threshold = 0.05

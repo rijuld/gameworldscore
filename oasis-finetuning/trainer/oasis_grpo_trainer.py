@@ -941,7 +941,9 @@ class OasisGRPOTrainer:
         
         # Adaptive KL Penalty (Fix 15)
         # Adjust kl_coeff based on average KL divergence of the batch
-        if self.config.use_kl_in_reward and len(metrics['kl']) > 0:
+        # Only if enabled in config
+        use_adaptive_kl = getattr(self.config, 'use_adaptive_kl', False)
+        if self.config.use_kl_in_reward and use_adaptive_kl and len(metrics['kl']) > 0:
             avg_kl = sum(metrics['kl']) / len(metrics['kl'])
             target_kl = self.config.kl_target
             

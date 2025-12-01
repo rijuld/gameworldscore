@@ -23,8 +23,8 @@ reward:
   idm_weights_path: "models_for_rl_finetuning/4x_idm.weights"
   require_vpt: true
   # GameWorldScore component weights
-  rik_weight: 0           # Inverse Kinematics (action fidelity) - FIXED: Enabled at 0.5
-  rtc_weight: 1           # Temporal Consistency (CLIP similarity) - FIXED: Enabled at 0.3
+  rik_weight: 1           # Inverse Kinematics (action fidelity) - FIXED: Enabled at 0.5
+  rtc_weight: 0           # Temporal Consistency (CLIP similarity) - FIXED: Enabled at 0.3
   raq_weight: 0.0           # Aesthetic Quality (LAION aesthetic)
   rrg_weight: 0.0           # Reality Grounding (anti-drift)
   anti_drift_weight: 0    # Anti-Drift (Sharpness/Motion/Texture) - FIXED: Set to 1.0
@@ -75,7 +75,7 @@ grpo:
 # -----------------------------------------------------------------------------
 kl:
   use_kl_in_reward: true
-  kl_coeff: 0.5             # FIXED: Increased drastically (was 0.01) to force policy to stay close
+  kl_coeff: 0.8             # FIXED: Increased drastically (was 0.01) to force policy to stay close
   kl_target: 0.01           # FIXED: Decreased (was 0.2) to tighten constraint
   kl_compute_freq: 5        # Compute KL every N steps
 

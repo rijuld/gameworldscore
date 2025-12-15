@@ -240,6 +240,72 @@ Sample videos are saved to `videos/` directory:
 - Generated every `video_save_freq` steps (default: 50)
 - Shows generated sequences for visual inspection
 
+## Testing Checkpoints
+
+### Test Most Recent Checkpoint
+
+Test the most recent checkpoint on test data:
+
+```bash
+cd oasis-finetuning
+
+# Test most recent checkpoint
+python test_checkpoint.py
+
+# Test with specific number of samples
+python test_checkpoint.py --max-samples 50
+
+# Save generated videos
+python test_checkpoint.py --save-videos
+
+# Test specific checkpoint
+python test_checkpoint.py --checkpoint checkpoints/oasis_grpo/step_1000
+
+# Custom output directory
+python test_checkpoint.py --output-dir my_test_results
+```
+
+### Test Script Features
+
+The test script (`test_checkpoint.py`) provides:
+
+- **Automatic checkpoint detection**: Finds the most recent checkpoint automatically
+- **Comprehensive evaluation**: Computes GameWorldScore rewards and component metrics
+- **Per-frame analysis**: Shows reward degradation over time
+- **Video generation**: Optionally saves sample videos for visual inspection
+- **JSON results**: Saves detailed metrics to JSON file
+
+### Test Output
+
+The test script generates:
+
+1. **Console output**: Summary statistics and metrics
+2. **JSON results file**: `test_results/test_results_step_*.json` with detailed metrics
+3. **Sample videos** (if `--save-videos`): `test_results/videos/sample_*.mp4`
+
+Example output:
+```
+Evaluation Results
+==================
+Checkpoint: Step 1000
+Number of samples evaluated: 50
+
+Overall Reward Statistics:
+  Mean: 0.7234 ± 0.1234
+  Range: [0.4567, 0.9123]
+
+Per-Frame Reward (showing degradation over time):
+  Frame 1: 0.7456 ± 0.1123
+  Frame 2: 0.7234 ± 0.1234
+  ...
+
+Component Rewards:
+  rik_reward: 0.8123 ± 0.0987
+  rtc_reward: 0.7234 ± 0.1123
+  raq_reward: 0.6789 ± 0.1345
+  ...
+```
+
 ## Troubleshooting
 
 ### Import Errors

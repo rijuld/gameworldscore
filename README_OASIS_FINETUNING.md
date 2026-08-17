@@ -27,14 +27,14 @@ The Oasis finetuning system uses:
 The code expects the following repositories to be cloned in the parent directory:
 
 ```bash
-# Navigate to parent directory (RLFS)
-cd /path/to/RLFS
+# Navigate to the repository root (RL-Project)
+cd /path/to/RL-Project
 
 # Clone open-oasis (Oasis model implementation)
-git clone https://github.com/EtchedAI/open-oasis.git
+git clone https://github.com/etched-ai/open-oasis.git
 
 # Clone RLVR-World (GRPO training infrastructure)
-git clone https://github.com/RLVR-World/RLVR-World.git
+git clone https://github.com/thuml/RLVR-World.git
 
 # Clone VPT (Video Pre-Training - for Inverse Dynamics Model)
 git clone https://github.com/openai/Video-Pre-Training.git VPT
@@ -42,8 +42,8 @@ git clone https://github.com/openai/Video-Pre-Training.git VPT
 
 **Directory Structure:**
 ```
-RLFS/
-├── oasis-finetuning/          # This repository
+RL-Project/
+├── oasis-finetuning/          # This code
 ├── open-oasis/                # Oasis model code
 ├── RLVR-World/                # GRPO training infrastructure
 └── VPT/                       # Video Pre-Training (for IDM)
@@ -327,7 +327,7 @@ export VPT_PATH=/path/to/VPT
 **open-oasis not found:**
 ```bash
 # Ensure open-oasis is cloned in parent directory
-git clone https://github.com/EtchedAI/open-oasis.git ../open-oasis
+git clone https://github.com/etched-ai/open-oasis.git ../open-oasis
 ```
 
 ### Memory Issues
@@ -414,7 +414,7 @@ If you use this code, please cite:
 
 ## Acknowledgments
 
-- [Oasis](https://github.com/EtchedAI/open-oasis) - Diffusion transformer world model
-- [RLVR-World](https://github.com/RLVR-World/RLVR-World) - GRPO training infrastructure
+- [Oasis](https://github.com/etched-ai/open-oasis) - Diffusion transformer world model
+- [RLVR-World](https://github.com/thuml/RLVR-World) - GRPO training infrastructure
 - [VPT](https://github.com/openai/Video-Pre-Training) - Video Pre-Training and Inverse Dynamics Model
 
